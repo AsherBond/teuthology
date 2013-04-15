@@ -87,7 +87,7 @@ describe. One job is run at a time.
             args = [
                 os.path.join(os.path.dirname(sys.argv[0]), 'teuthology-results'),
                 '--timeout',
-                str(job_config.get('results_timeout', 21600)),
+                str(job_config.get('results_timeout', 1800)),
                 '--email',
                 job_config['email'],
                 '--archive-dir',

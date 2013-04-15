@@ -100,6 +100,6 @@ echo "name $name"
 ~/src/teuthology/virtualenv/bin/teuthology-suite -v $fn \
     --collections ~/src/ceph-qa-suite/suites/$suite/* \
     --email $email \
-    --timeout 21600 \
+    --timeout 1800 \
     --name $name \
     --branch $teuthology_branch
