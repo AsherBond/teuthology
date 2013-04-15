@@ -225,7 +225,7 @@ Lock, unlock, or query lock status of machines.
         )
     parser.add_argument(
         '--vm-type',
-        default='ubuntu',
+        default='centos',
         help='virtual machine type',
         )
 
@@ -520,7 +520,7 @@ def do_create_ifvm(ctx, machine_name):
     try:
         vm_type = ctx.vm_type
     except AttributeError:
-        vm_type = 'ubuntu'
+        vm_type = 'centos'
     createMe = decanonicalize_hostname(machine_name)
     fname = ".%s.downburst.yaml" % vm_type
     teuthology.read_yaml(ctx,fname)
