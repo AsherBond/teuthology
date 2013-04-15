@@ -7,7 +7,6 @@ import urllib
 import yaml
 import re
 import collections
-import os
 import tempfile
 
 from teuthology import misc as teuthology
@@ -349,9 +348,7 @@ Lock, unlock, or query lock status of machines.
                     return ret
             else:
                 machines_to_update.append(machine)
-                status_info = get_status(ctx,machine)
-                if status_info['vpshost']:
-                    do_create(ctx, machine, status_info['vpshost'])
+                do_create_ifvm(ctx, machine)
     elif ctx.unlock:
         for machine in machines:
             if not unlock(ctx, machine, user):
@@ -360,9 +357,7 @@ Lock, unlock, or query lock status of machines.
                     return ret
             else:
                 machines_to_update.append(machine)
-                status_info = get_status(ctx,machine)
-                if status_info['vpshost']:
-                    do_destroy(machine, status_info['vpshost'])
+                do_destroy_ifvm(ctx, machine)
     elif ctx.num_to_lock:
         result = lock_many(ctx, ctx.num_to_lock, ctx.machine_type, user)
         if not result:
@@ -454,9 +449,11 @@ def scan_for_locks(ctx, machines):
     for lock in locks:
         current_locks[lock['name']] = lock
 
-    if ctx.all:
-        machines = current_locks.keys()
-
+    try:
+        if ctx.all:
+            machines = current_locks.keys()
+    except AttributeError:
+        pass
     for i, machine in enumerate(machines):
         if '@' in machine:
             _, machines[i] = machine.rsplit('@')
@@ -515,25 +512,42 @@ def decanonicalize_hostname(s):
 #
 # Use downburst to create a virtual machine
 #
-def do_create(ctx, machine_name, phys_host):
-    vmType = ctx.vm_type
+def do_create_ifvm(ctx, machine_name):
+    status_info = get_status(ctx,machine_name)
+    phys_host = status_info['vpshost']
+    if not phys_host:
+        return False
+    try:
+        vm_type = ctx.vm_type
+    except AttributeError:
+        vm_type = 'ubuntu'
     createMe = decanonicalize_hostname(machine_name)
+    fname = ".%s.downburst.yaml" % vm_type
+    teuthology.read_yaml(ctx,fname)
+    lcnfg = ctx.teuthology_config
     with tempfile.NamedTemporaryFile() as tmp:
-        fileInfo1 = {}
-        fileInfo1['disk-size'] = '30G'
-        fileInfo1['ram'] = '4G'
-        fileInfo1['cpus'] = 1;
-        fileInfo1['networks'] = [{'source' : 'front'}]
-        fileInfo1['distro'] = vmType.lower()
-        fileOwt = {'downburst': fileInfo1}
-        yaml.safe_dump(fileOwt,tmp)
+        file_out = lcnfg.get('downburst')
+        if not file_out:
+            file_info = {}
+            file_info['disk-size'] = lcnfg.get('disk-size','30G')
+            file_info['ram'] = lcnfg.get('ram','4G')
+            file_info['cpus'] = lcnfg.get('cpus',1)
+            file_info['networks'] = lcnfg.get('networks',[{'source' : 'front'}])
+            file_info['distro'] = lcnfg.get('distro',vm_type.lower())
+            for down_opt in ['additional-disks', 'additional-disks-size',
+                    'distroversion', 'arch',]:
+                optv = lcnfg.get(down_opt)
+                if optv:
+                    file_info[down_opt] = optv
+            file_out = {'downburst': file_info}
+        yaml.safe_dump(file_out,tmp)
         metadata = "--meta-data=%s" % tmp.name
-        p = subprocess.Popen(['downburst', '-c', phys_host,
+        p = subprocess.Popen(['/home/ubuntu/src/downburst/virtualenv/bin/downburst', '-c', phys_host,
                 'create', metadata, createMe],
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
         owt,err = p.communicate()
         if err:
-            log.info("Downburst command to create %s may have failed: %s",
+            log.info("Downburst command to create %s may have failed: %s" %
                     (machine_name,err))
         else:
             log.info("%s created: %s" % (machine_name,owt))
@@ -541,9 +555,13 @@ def do_create(ctx, machine_name, phys_host):
 #
 # Use downburst to destroy a virtual machine
 #
-def do_destroy(machine_name, phys_host):
+def do_destroy_ifvm(ctx, machine_name):
+    status_info = get_status(ctx,machine_name)
+    phys_host = status_info['vpshost']
+    if not phys_host:
+        return False
     destroyMe = decanonicalize_hostname(machine_name)
-    p = subprocess.Popen(['downburst', '-c', phys_host,
+    p = subprocess.Popen(['/home/ubuntu/src/downburst/virtualenv/bin/downburst', '-c', phys_host,
             'destroy', destroyMe],
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
     owt,err = p.communicate()
@@ -551,4 +569,5 @@ def do_destroy(machine_name, phys_host):
         log.info("Error occurred while deleting %s" % destroyMe)
     else:
         log.info("%s destroyed: %s" % (machine_name,owt))
+    return True
 

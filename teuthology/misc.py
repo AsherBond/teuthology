@@ -726,13 +726,21 @@ def get_clients(ctx, roles):
 def get_user():
     return getpass.getuser() + '@' + socket.gethostname()
 
-def read_config(ctx):
-    filename = os.path.join(os.environ['HOME'], '.teuthology.yaml')
-    ctx.teuthology_config = {}
+def read_yaml(ctx, inpt_file):
+    filename = os.path.join(os.environ['HOME'], inpt_file)
+    if not os.path.isfile(filename):
+        return
+    try:
+        _ = ctx.teuthology_config
+    except AttributeError:
+        ctx.teuthology_config = {}
     with file(filename) as f:
         g = yaml.safe_load_all(f)
         for new in g:
             ctx.teuthology_config.update(new)
+
+def read_config(ctx):
+    read_yaml(ctx,'.teuthology.yaml')
 
 def get_mon_names(ctx):
     mons = []

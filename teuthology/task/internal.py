@@ -96,7 +96,22 @@ def lock_machines(ctx, config):
 
         newly_locked = lock.lock_many(ctx, config, machine_type, ctx.owner, ctx.archive)
         if len(newly_locked) == config:
-            ctx.config['targets'] = newly_locked
+            vmlist = []
+            for lmach in newly_locked:
+                if lock.do_create_ifvm(ctx,lmach):
+                    vmlist.append(lmach)
+                vmlist.append(lmach)
+            if vmlist:
+                log.info('Waiting for virtual machines to come up')
+                time.sleep(300)
+                lock.scan_for_locks(ctx,vmlist)
+                newscandict = {}
+                for dkey in newly_locked.iterkeys():
+                    stats = lock.get_status(ctx,dkey)
+                    newscandict[dkey] = stats['sshpubkey']
+                ctx.config['targets'] = newscandict
+            else:
+                ctx.config['targets'] = newly_locked
             log.info('\n  '.join(['Locked targets:', ] + yaml.safe_dump(ctx.config['targets'], default_flow_style=False).splitlines()))
             break
         elif not ctx.block:
