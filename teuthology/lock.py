@@ -497,17 +497,27 @@ def decanonicalize_hostname(s):
 # Use downburst to create a virtual machine
 #
 def do_create(ctx, machine_name, phys_host):
-    vmType = ctx.vm_type
+    vm_type = ctx.vm_type
     createMe = decanonicalize_hostname(machine_name)
+    fname = ".%s.downburst.yaml" % vm_type
+    teuthology.read_yaml(ctx,fname)
+    lcnfg = ctx.teuthology_config
     with tempfile.NamedTemporaryFile() as tmp:
-        fileInfo1 = {}
-        fileInfo1['disk-size'] = '30G'
-        fileInfo1['ram'] = '4G'
-        fileInfo1['cpus'] = 1;
-        fileInfo1['networks'] = [{'source' : 'front'}]
-        fileInfo1['distro'] = vmType.lower()
-        fileOwt = {'downburst': fileInfo1}
-        yaml.safe_dump(fileOwt,tmp)
+        file_out = lcnfg.get('downburst')
+        if not file_out:
+            file_info = {}
+            file_info['disk-size'] = lcnfg.get('disk-size','30G')
+            file_info['ram'] = lcnfg.get('ram','4G')
+            file_info['cpus'] = lcnfg.get('cpus',1)
+            file_info['networks'] = lcnfg.get('networks',[{'source' : 'front'}])
+            file_info['distro'] = lcnfg.get('distro',vm_type.lower())
+            for down_opt in ['additional-disks', 'additional-disks-size',
+                    'distroversion', 'arch',]:
+                optv = lcnfg.get(down_opt)
+                if optv:
+                    file_info[down_opt] = optv
+            file_out = {'downburst': file_info}
+        yaml.safe_dump(file_out,tmp)
         metadata = "--meta-data=%s" % tmp.name
         p = subprocess.Popen(['downburst', '-c', phys_host,
                 'create', metadata, createMe],
