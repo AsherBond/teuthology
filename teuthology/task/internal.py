@@ -79,7 +79,6 @@ def lock_machines(ctx, config):
             else:
                 assert 0, 'error listing machines'
         num_up = len(filter(lambda machine: machine['up'] and machine['type'] == machine_type, machines))
-        print num_up
         assert num_up >= config, 'not enough machines are up'
 
         # make sure there are machines for non-automated jobs to run
@@ -97,7 +96,24 @@ def lock_machines(ctx, config):
 
         newly_locked = lock.lock_many(ctx, config, machine_type, ctx.owner, ctx.archive)
         if len(newly_locked) == config:
-            ctx.config['targets'] = newly_locked
+            vmlist = []
+            for lmach in newly_locked:
+                if lock.do_create_ifvm(ctx,lmach):
+                    vmlist.append(lmach)
+                vmlist.append(lmach)
+            if vmlist:
+                log.info('Waiting for virtual machines to come up')
+                chkr = 0
+                while chkr == 0:
+                    time.sleep(10)
+                    chkr = lock.scan_for_locks(ctx, vmlist, True)
+                newscandict = {}
+                for dkey in newly_locked.iterkeys():
+                    stats = lockstatus.get_status(ctx,dkey)
+                    newscandict[dkey] = stats['sshpubkey']
+                ctx.config['targets'] = newscandict
+            else:
+                ctx.config['targets'] = newly_locked
             log.info('\n  '.join(['Locked targets:', ] + yaml.safe_dump(ctx.config['targets'], default_flow_style=False).splitlines()))
             break
         elif not ctx.block:

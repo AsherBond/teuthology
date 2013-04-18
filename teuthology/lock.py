@@ -7,6 +7,7 @@ import yaml
 import re
 import collections
 import tempfile
+import os
 
 from teuthology import lockstatus as ls
 from teuthology import misc as teuthology
@@ -51,6 +52,8 @@ def unlock(ctx, name, user=None):
                                   urllib.urlencode(dict(user=user)))
     if success:
         log.debug('unlocked %s', name)
+        if not do_destroy_ifvm(ctx, name):
+            log.error('downburst destroy failed for %s',name)
     else:
         log.error('failed to unlock %s', name)
     return success
@@ -269,10 +272,11 @@ Lock, unlock, or query lock status of machines.
             statuses = list_locks(ctx)
         vmachines = []
 
-        for vmachine in statuses:
-            if vmachine['vpshost']:
-                if vmachine['locked']:
-                    vmachines.append(vmachine['name'])
+        if statuses:
+            for vmachine in statuses:
+                if vmachine['vpshost']:
+                    if vmachine['locked']:
+                        vmachines.append(vmachine['name'])
         if vmachines:
             scan_for_locks(ctx, vmachines)
             if machines:
@@ -330,9 +334,7 @@ Lock, unlock, or query lock status of machines.
                     return ret
             else:
                 machines_to_update.append(machine)
-                status_info = ls.get_status(ctx,machine)
-                if status_info['vpshost']:
-                    do_create(ctx, machine, status_info['vpshost'])
+                do_create_ifvm(ctx, machine)
     elif ctx.unlock:
         for machine in machines:
             if not unlock(ctx, machine, user):
@@ -341,9 +343,7 @@ Lock, unlock, or query lock status of machines.
                     return ret
             else:
                 machines_to_update.append(machine)
-                status_info = ls.get_status(ctx,machine)
-                if status_info['vpshost']:
-                    do_destroy(machine, status_info['vpshost'])
+                do_destroy_ifvm(ctx, machine)
     elif ctx.num_to_lock:
         result = lock_many(ctx, ctx.num_to_lock, ctx.machine_type, user)
         if not result:
@@ -429,14 +429,17 @@ to run on, or use -a to check all of them automatically.
     
     return scan_for_locks(ctx, machines)
 
-def scan_for_locks(ctx, machines):
+def scan_for_locks(ctx, machines, chk_if_found=False):
     locks = list_locks(ctx)
     current_locks = {}
     for lock in locks:
         current_locks[lock['name']] = lock
 
-    if ctx.all:
-        machines = current_locks.keys()
+    try:
+        if ctx.all:
+            machines = current_locks.keys()
+    except AttributeError:
+        pass
 
     for i, machine in enumerate(machines):
         if '@' in machine:
@@ -456,6 +459,8 @@ def scan_for_locks(ctx, machines):
         # TODO: separate out user
         full_name = 'ubuntu@{host}'.format(host=hostname)
         log.info('Checking %s', full_name)
+        if chk_if_found:
+            ret = 2
         assert full_name in current_locks, 'host is not in the database!'
         if current_locks[full_name]['sshpubkey'] != pubkey:
             log.info('New key found. Updating...')
@@ -512,8 +517,15 @@ def _get_downburst_exec():
 #
 # Use downburst to create a virtual machine
 #
-def do_create(ctx, machine_name, phys_host):
-    vm_type = ctx.vm_type
+def do_create_ifvm(ctx, machine_name):
+    status_info = ls.get_status(ctx,machine_name)
+    phys_host = status_info['vpshost']
+    if not phys_host:
+        return False
+    try:
+        vm_type = ctx.vm_type
+    except AttributeError:
+        vm_type = 'ubuntu'
     createMe = decanonicalize_hostname(machine_name)
     fname = ".%s.downburst.yaml" % vm_type
     teuthology.read_yaml(ctx,fname)
@@ -544,26 +556,33 @@ def do_create(ctx, machine_name, phys_host):
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
         owt,err = p.communicate()
         if err:
-            log.info("Downburst command to create %s may have failed: %s",
+            log.info("Downburst command to create %s may have failed: %s"%
                     (machine_name,err))
         else:
             log.info("%s created: %s" % (machine_name,owt))
     return True
 #
 # Use downburst to destroy a virtual machine
-#
-def do_destroy(machine_name, phys_host):
+# Return False only on downburst failures (return True if not a vm --
+#      no downburst is needed in that case).
+def do_destroy_ifvm(ctx, machine_name):
+    status_info = ls.get_status(ctx,machine_name)
+    phys_host = status_info['vpshost']
+    if not phys_host:
+        return True
     destroyMe = decanonicalize_hostname(machine_name)
     dbrst = _get_downburst_exec()
     if not dbrst:
         log.info("Error: no downburst executable found")
-        return
+        return False
     p = subprocess.Popen([dbrst, '-c', phys_host,
             'destroy', destroyMe],
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
     owt,err = p.communicate()
     if err:
         log.info("Error occurred while deleting %s" % destroyMe)
+        return False
     else:
         log.info("%s destroyed: %s" % (machine_name,owt))
+    return True
 
