@@ -660,9 +660,17 @@ def task(ctx, config):
     assert isinstance(config, dict), \
         "task install only supports a dictionary for configuration"
 
+<<<<<<< HEAD
     project = config.get('project', 'ceph'),
     overrides = ctx.config.get('overrides', {}).get('install', {})
     teuthology.deep_merge(config, overrides.get(project, {}))
+=======
+    project, = config.get('project', 'ceph'),
+    log.debug('project %s' % project)
+    overrides = ctx.config.get('overrides', {}).get('install', {})
+    teuthology.deep_merge(config, overrides.get(project, {}))
+    log.debug('config %s' % config)
+>>>>>>> d7ec0892808848a4c1875499c1cfeb3f1dae701d
 
     # Flavor tells us what gitbuilder to fetch the prebuilt software
     # from. It's a combination of possible keywords, in a specific
