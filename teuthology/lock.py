@@ -8,6 +8,7 @@ import re
 import collections
 import tempfile
 import os
+import time
 
 from teuthology import lockstatus as ls
 from teuthology import misc as teuthology
@@ -27,6 +28,9 @@ def lock_many(ctx, num, machinetype, user=None, description=None):
     if success:
         machines = json.loads(content)
         log.debug('locked {machines}'.format(machines=', '.join(machines.keys())))
+        if ctx.machine_type == 'vps':
+            for machine in machines:
+                create_if_vm(ctx, machine)
         return machines
     if status == 503:
         log.error('Insufficient nodes available to lock %d nodes.', num)
@@ -34,11 +38,11 @@ def lock_many(ctx, num, machinetype, user=None, description=None):
         log.error('Could not lock %d nodes, reason: unknown.', num)
     return []
 
-def lock(ctx, name, user=None):
+def lock(ctx, name, user=None, description=None):
     if user is None:
         user = teuthology.get_user()
     success, _, _ = ls.send_request('POST', ls._lock_url(ctx) + '/' + name,
-                              urllib.urlencode(dict(user=user)))
+                              urllib.urlencode(dict(user=user, desc=description)))
     if success:
         log.debug('locked %s as %s', name, user)
     else:
@@ -65,6 +69,13 @@ def list_locks(ctx):
     return None
 
 def update_lock(ctx, name, description=None, status=None, sshpubkey=None):
+    status_info = ls.get_status(ctx, name)
+    phys_host = status_info['vpshost']
+    if phys_host:
+        keyscan_out = ''
+        while not keyscan_out:
+            time.sleep(10)
+            keyscan_out, _ = keyscan_check(ctx, [name])
     updated = {}
     if description is not None:
         updated['desc'] = description
@@ -174,7 +185,7 @@ Lock, unlock, or query lock status of machines.
         )
     parser.add_argument(
         '--machine-type',
-        default='plana',
+        default=None,
         help='Type of machine to lock',
         )
     parser.add_argument(
@@ -209,7 +220,7 @@ Lock, unlock, or query lock status of machines.
         help='machines to operate on',
         )
     parser.add_argument(
-        '--vm-type',
+        '--os-type',
         default='ubuntu',
         help='virtual machine type',
         )
@@ -259,6 +270,9 @@ Lock, unlock, or query lock status of machines.
             '--all and --owner are mutually exclusive'
         assert not machines, \
             '--all and listing specific machines are incompatible'
+    if ctx.num_to_lock:
+        assert ctx.machine_type, \
+            'must specify machine type to lock'
 
     if ctx.brief:
         assert ctx.list, '--brief only applies to --list'
@@ -267,7 +281,14 @@ Lock, unlock, or query lock status of machines.
         assert ctx.desc is None, '--desc does nothing with --list'
 
         if machines:
-            statuses = [ls.get_status(ctx, machine) for machine in machines]
+            statuses = []
+            for machine in machines:
+                status = ls.get_status(ctx, machine)
+                if status:
+                    statuses.append(status)
+                else:
+                    log.error("Lockserver doesn't know about machine: %s" %
+                              machine)
         else:
             statuses = list_locks(ctx)
         vmachines = []
@@ -285,6 +306,9 @@ Lock, unlock, or query lock status of machines.
             else:
                 statuses = list_locks(ctx)
         if statuses:
+            if ctx.machine_type:
+                statuses = [status for status in statuses \
+                                if status['type'] == ctx.machine_type]
             if not machines and ctx.owner is None and not ctx.all:
                 ctx.owner = teuthology.get_user()
             if ctx.owner is not None:
@@ -352,9 +376,10 @@ Lock, unlock, or query lock status of machines.
         else:
             machines_to_update = result.keys()
             if ctx.machine_type == 'vps':
-                print "Locks successful"
-                print "Unable to display keys at this time (virtual machines are rebooting)."
-                print "Please run teuthology-lock --list-targets once these machines come up."
+                shortnames = ' '.join([name.split('@')[1].split('.')[0] for name in result.keys()])
+                print "Successfully Locked:\n%s\n" % shortnames
+                print "Unable to display keys at this time (virtual machines are booting)."
+                print "Please run teuthology-lock --list-targets %s once these machines come up." % shortnames
             else:
                 print yaml.safe_dump(dict(targets=result), default_flow_style=False)
     elif ctx.update:
@@ -427,7 +452,7 @@ to run on, or use -a to check all of them automatically.
                             machines.append(t)
         except IOError, e:
             raise argparse.ArgumentTypeError(str(e))
-    
+
     return scan_for_locks(ctx, machines)
 
 def keyscan_check(ctx, machines):
@@ -450,7 +475,7 @@ def keyscan_check(ctx, machines):
         stdout=subprocess.PIPE,
         )
     out, _ = p.communicate()
-    assert p.returncode == 0, 'ssh-keyscan failed'
+    #assert p.returncode == 0, 'ssh-keyscan failed'
     return (out, current_locks)
 
 def update_keys(ctx, out, current_locks):
@@ -467,7 +492,7 @@ def update_keys(ctx, out, current_locks):
                 log.error('failed to update %s!', full_name)
                 ret = 1
     return ret
-    
+
 def scan_for_locks(ctx, machines):
     out, current_locks = keyscan_check(ctx, machines)
     return update_keys(ctx, out, current_locks)
@@ -475,7 +500,7 @@ def scan_for_locks(ctx, machines):
 def do_summary(ctx):
     lockd = collections.defaultdict(lambda: [0,0,'unknown'])
     for l in list_locks(ctx):
-        if l['type'] != ctx.machine_type:
+        if ctx.machine_type and l['type'] != ctx.machine_type:
             continue
         who =  l['locked_by'] if l['locked'] == 1 else '(free)', l['type']
         lockd[who][0] += 1
@@ -529,28 +554,44 @@ def create_if_vm(ctx, machine_name):
     phys_host = status_info['vpshost']
     if not phys_host:
         return False
-    try:
-        vm_type = ctx.vm_type
-    except AttributeError:
-        vm_type = 'ubuntu'
+    from teuthology.misc import get_distro
+    os_type = get_distro(ctx)
+    default_os_version = dict(
+        ubuntu="12.04",
+        fedora="18",
+        centos="6.4",
+        opensuse="12.2",
+        sles="11-sp2",
+        rhel="6.3",
+        debian='6.0'
+        )
     createMe = decanonicalize_hostname(machine_name)
     with tempfile.NamedTemporaryFile() as tmp:
-        lcnfg = ctx.teuthology_config
-        file_out = lcnfg.get('downburst')
-        if not file_out:
-            file_info = {}
-            file_info['disk-size'] = lcnfg.get('disk-size', '30G')
-            file_info['ram'] = lcnfg.get('ram', '4G')
-            file_info['cpus'] = lcnfg.get('cpus', 1)
-            file_info['networks'] = lcnfg.get('networks',
-                    [{'source' : 'front'}])
-            file_info['distro'] = lcnfg.get('distro', vm_type.lower())
-            file_info['additional-disks'] = lcnfg.get(
-                    'additional-disks', 3)
-            file_info['additional-disks-size'] = lcnfg.get(
-                    'additional-disks-size', '200G')
-            file_info['arch'] = lcnfg.get('arch', 'x86_64')
-            file_out = {'downburst': file_info}
+        try:
+            lcnfg = ctx.config['downburst']
+        except (KeyError, AttributeError):
+            lcnfg = {}
+
+        distro = lcnfg.get('distro', os_type.lower())
+        try:
+            distroversion = ctx.config.get('os_version', default_os_version[distro])
+        except AttributeError:
+            distroversion = default_os_version[distro]
+
+        file_info = {}
+        file_info['disk-size'] = lcnfg.get('disk-size', '30G')
+        file_info['ram'] = lcnfg.get('ram', '1.9G')
+        file_info['cpus'] = lcnfg.get('cpus', 1)
+        file_info['networks'] = lcnfg.get('networks',
+                [{'source' : 'front', 'mac' : status_info['mac']}])
+        file_info['distro'] = distro
+        file_info['distroversion'] = distroversion
+        file_info['additional-disks'] = lcnfg.get(
+                'additional-disks', 3)
+        file_info['additional-disks-size'] = lcnfg.get(
+                'additional-disks-size', '200G')
+        file_info['arch'] = lcnfg.get('arch', 'x86_64')
+        file_out = {'downburst': file_info}
         yaml.safe_dump(file_out, tmp)
         metadata = "--meta-data=%s" % tmp.name
         dbrst = _get_downburst_exec()
@@ -562,10 +603,16 @@ def create_if_vm(ctx, machine_name):
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,)
         owt,err = p.communicate()
         if err:
-            log.info("Downburst command to create %s failed: %s" %
+            log.info("Downburst completed on %s: %s" %
                     (machine_name,err))
         else:
             log.info("%s created: %s" % (machine_name,owt))
+        #If the guest already exists first destroy then re-create:
+        if 'exists' in err:
+            log.info("Guest files exist. Re-creating guest: %s" %
+                    (machine_name))
+            destroy_if_vm(ctx, machine_name)
+            create_if_vm(ctx, machine_name)
     return True
 #
 # Use downburst to destroy a virtual machine

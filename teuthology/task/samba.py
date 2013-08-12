@@ -196,7 +196,28 @@ def task(ctx, config):
             try:
                 remote.run(
                     args=[
+                        'while',
                         'sudo', 'killall', '-9', 'smbd',
+                        run.Raw(';'),
+                        'do', 'sleep', '1',
+                        run.Raw(';'),
+                        'done',
+                        ],
+                    )
+
+                remote.run(
+                    args=[
+                        'sudo',
+                        'lsof',
+                        backend,
+                        ],
+                    )
+                remote.run(
+                    args=[
+                        'sudo',
+                        'fuser',
+                        '-M',
+                        backend,
                         ],
                     )
             except:

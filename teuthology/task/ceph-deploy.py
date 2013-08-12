@@ -60,7 +60,6 @@ def is_healthy(ctx, config):
                 run.Raw('&&'),
                 'sudo', 'ceph',
                 'health',
-                '--concise',
                 ],
             stdout=StringIO(),
             logger=log.getChild('health'),
@@ -145,54 +144,93 @@ def build_ceph_cluster(ctx, config):
     install_nodes = './ceph-deploy install '+ceph_branch+" "+all_nodes
     purge_nodes = './ceph-deploy purge'+" "+all_nodes
     purgedata_nodes = './ceph-deploy purgedata'+" "+all_nodes
-    mon_create_nodes = './ceph-deploy mon create'+" "+mon_nodes
     mon_hostname = mon_nodes.split(' ')[0]
     mon_hostname = str(mon_hostname)
     gather_keys = './ceph-deploy gatherkeys'+" "+mon_hostname
     deploy_mds = './ceph-deploy mds create'+" "+mds_nodes
     no_of_osds = 0
-    if mon_nodes is not None:
-        estatus_new = execute_ceph_deploy(ctx, config, new_mon)
-        if estatus_new == 0:
-            estatus_install = execute_ceph_deploy(ctx, config, install_nodes)
-            if estatus_install==0:
-                estatus_mon = execute_ceph_deploy(ctx, config, mon_create_nodes)
-                if estatus_mon==0:
-                    estatus_gather = execute_ceph_deploy(ctx, config, gather_keys)
-                    if estatus_gather != 0:
-                        while (estatus_gather != 0):
-                            execute_ceph_deploy(ctx, config, mon_create_nodes)
-                            estatus_gather = execute_ceph_deploy(ctx, config, gather_keys)
-                            if estatus_gather == 0:
-                                break
-                    estatus_mds = execute_ceph_deploy(ctx, config, deploy_mds)
-                    if estatus_mds==0:
-                        node_dev_list = get_dev_for_osd(ctx, config)
-                        for d in node_dev_list:
-                            osd_create_cmds = './ceph-deploy osd create --zap-disk'+" "+d
-                            estatus_osd = execute_ceph_deploy(ctx, config, osd_create_cmds)
-                            if estatus_osd==0:
-                                log.info('successfully created osd')
-                                no_of_osds += 1
-                            else:
-                                zap_disk = './ceph-deploy zapdisk'+" "+d
-                                execute_ceph_deploy(ctx, config, zap_disk)
-                                estatus_osd = execute_ceph_deploy(ctx, config, osd_create_cmds)
-                                if estatus_osd==0:
-                                    log.info('successfully created osd')
-                                    no_of_osds += 1
-                                else:
-                                    log.info('failed to create osd')
-                    else:
-                        log.info('failed to deploy mds')
-                else:
-                    log.info('failed to create monitors')
-            else:
-                  log.info('failed to install ceph')
-        else:
-            log.info('failed to create config file and monitor keyring')
+
+    if mon_nodes is None:
+        raise Exception("no monitor nodes in the config file")
+
+    estatus_new = execute_ceph_deploy(ctx, config, new_mon)
+    if estatus_new != 0:
+        raise Exception("ceph-deploy: new command failed")
+
+    log.info('adding config inputs...')
+    testdir = teuthology.get_testdir(ctx)
+    conf_path = '{tdir}/ceph-deploy/ceph.conf'.format(tdir=testdir)
+    first_mon = teuthology.get_first_mon(ctx, config)
+    (remote,) = ctx.cluster.only(first_mon).remotes.keys()
+
+    lines = None
+    if config.get('conf') is not None:
+        confp = config.get('conf')
+        for section, keys in confp.iteritems():
+                lines = '[{section}]\n'.format(section=section)
+                teuthology.append_lines_to_file(remote, conf_path, lines, sudo=True)
+                for key, value in keys.iteritems():
+                    log.info("[%s] %s = %s" % (section, key, value))
+                    lines = '{key} = {value}\n'.format(key=key, value=value)
+                    teuthology.append_lines_to_file(remote, conf_path, lines, sudo=True)
+
+    estatus_install = execute_ceph_deploy(ctx, config, install_nodes)
+    if estatus_install != 0:
+        raise Exception("ceph-deploy: Failed to install ceph")
+
+    mon_no = None
+    mon_no = config.get('mon_initial_members')
+    if mon_no is not None:
+        i = 0
+        mon1 = []
+        while(i < mon_no):
+            mon1.append(mon_node[i])
+            i = i + 1
+        initial_mons = " ".join(mon1)
+        for k in range(mon_no, len(mon_node)):
+            mon_create_nodes = './ceph-deploy mon create'+" "+initial_mons+" "+mon_node[k]
+            estatus_mon = execute_ceph_deploy(ctx, config, mon_create_nodes)
+            if estatus_mon != 0:
+                raise Exception("ceph-deploy: Failed to create monitor")
     else:
-        log.info('no monitor nodes in the config file')
+        mon_create_nodes = './ceph-deploy mon create'+" "+mon_nodes
+        estatus_mon = execute_ceph_deploy(ctx, config, mon_create_nodes)
+        if estatus_mon != 0:
+            raise Exception("ceph-deploy: Failed to create monitors")
+
+    estatus_gather = execute_ceph_deploy(ctx, config, gather_keys)
+    while (estatus_gather != 0):
+        #mon_create_nodes = './ceph-deploy mon create'+" "+mon_node[0]
+        #execute_ceph_deploy(ctx, config, mon_create_nodes)
+        estatus_gather = execute_ceph_deploy(ctx, config, gather_keys)
+
+    estatus_mds = execute_ceph_deploy(ctx, config, deploy_mds)
+    if estatus_mds != 0:
+        raise Exception("ceph-deploy: Failed to deploy mds")
+
+    if config.get('test_mon_destroy') is not None:
+        for d in range(1, len(mon_node)):
+            mon_destroy_nodes = './ceph-deploy mon destroy'+" "+mon_node[d]
+            estatus_mon_d = execute_ceph_deploy(ctx, config, mon_destroy_nodes)
+            if estatus_mon_d != 0:
+                raise Exception("ceph-deploy: Failed to delete monitor")
+
+    node_dev_list = get_dev_for_osd(ctx, config)
+    for d in node_dev_list:
+        osd_create_cmds = './ceph-deploy osd create --zap-disk'+" "+d
+        estatus_osd = execute_ceph_deploy(ctx, config, osd_create_cmds)
+        if estatus_osd == 0:
+            log.info('successfully created osd')
+            no_of_osds += 1
+        else:
+            zap_disk = './ceph-deploy disk zap'+" "+d
+            execute_ceph_deploy(ctx, config, zap_disk)
+            estatus_osd = execute_ceph_deploy(ctx, config, osd_create_cmds)
+            if estatus_osd == 0:
+                log.info('successfully created osd')
+                no_of_osds += 1
+            else:
+                raise Exception("ceph-deploy: Failed to create osds")
 
     if config.get('wait-for-healthy', True) and no_of_osds >= 2:
         is_healthy(ctx=ctx, config=None)
@@ -337,6 +375,7 @@ def task(ctx, config):
         - ceph-deploy:
              branch:
                 stable: bobtail
+             mon_initial_members: 1
 
         tasks:
         - install:
@@ -345,6 +384,9 @@ def task(ctx, config):
         - ceph-deploy:
              branch:
                 dev: master
+             conf:
+                mon:
+                   debug mon = 20
 
         tasks:
         - install:
@@ -356,8 +398,15 @@ def task(ctx, config):
     """
     if config is None:
         config = {}
+
+    overrides = ctx.config.get('overrides', {})
+    teuthology.deep_merge(config, overrides.get('ceph-deploy', {}))
+
     assert isinstance(config, dict), \
         "task ceph-deploy only supports a dictionary for configuration"
+
+    overrides = ctx.config.get('overrides', {})
+    teuthology.deep_merge(config, overrides.get('ceph-deploy', {}))
 
     if config.get('branch') is not None:
         assert isinstance(config['branch'], dict), 'branch must be a dictionary'
@@ -366,7 +415,10 @@ def task(ctx, config):
          lambda: ceph_fn.ship_utilities(ctx=ctx, config=None),
          lambda: download_ceph_deploy(ctx=ctx, config=config),
          lambda: build_ceph_cluster(ctx=ctx, config=dict(
+                 conf=config.get('conf', {}),
                  branch=config.get('branch',{}),
+                 mon_initial_members=config.get('mon_initial_members', None),
+                 test_mon_destroy=config.get('test_mon_destroy', None),
                  )),
         ):
         yield

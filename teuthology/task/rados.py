@@ -57,7 +57,7 @@ def task(ctx, config):
     op_weights = config.get('op_weights', {})
     testdir = teuthology.get_testdir(ctx)
     args = [
-        '{tdir}/enable-coredump'.format(tdir=testdir),
+        '{tdir}/adjust-ulimits'.format(tdir=testdir),
         'ceph-coverage',
         '{tdir}/archive/coverage'.format(tdir=testdir),
         'ceph_test_rados',
@@ -89,25 +89,32 @@ def task(ctx, config):
                 logger=log.getChild('ceph_manager'),
                 )
 
+        clients = ['client.{id}'.format(id=id_) for id_ in teuthology.all_roles_of_type(ctx.cluster, 'client')]
+        log.info('clients are %s' % clients)
         for i in range(int(config.get('runs', '1'))):
             log.info("starting run %s out of %s", str(i), config.get('runs', '1'))
-            ctx.manager.remove_pool('data')
-            ctx.manager.create_pool('data')
             tests = {}
-            for role in config.get('clients', ['client.0']):
+            pools = []
+            for role in config.get('clients', clients):
                 assert isinstance(role, basestring)
                 PREFIX = 'client.'
                 assert role.startswith(PREFIX)
                 id_ = role[len(PREFIX):]
+                pool = 'radosmodel-%s' % id_
+                pools.append(pool)
+                ctx.manager.create_pool(pool)
                 (remote,) = ctx.cluster.only(role).remotes.iterkeys()
                 proc = remote.run(
-                    args=["CEPH_CLIENT_ID={id_}".format(id_=id_)] + args,
+                    args=["CEPH_CLIENT_ID={id_}".format(id_=id_)] + args +
+                    ["--pool", pool],
                     logger=log.getChild("rados.{id}".format(id=id_)),
                     stdin=run.PIPE,
                     wait=False
                     )
                 tests[id_] = proc
             run.wait(tests.itervalues())
+            for pool in pools:
+                ctx.manager.remove_pool(pool)
 
     running = gevent.spawn(thread)
 

@@ -34,15 +34,15 @@ class MonitorThrasher:
                         the monitor (default: 10)
     thrash_delay        Number of seconds to wait in-between
                         test iterations (default: 0)
-    store-thrash        Thrash monitor store before killing the monitor
+    thrash_store        Thrash monitor store before killing the monitor
                         being thrashed (default: False)
-    store-thrash-probability  Probability of thrashing a monitor's store
+    thrash_store_probability  Probability of thrashing a monitor's store
                               (default: 50)
-    thrash-many         Thrash multiple monitors instead of just one. If
+    thrash_many         Thrash multiple monitors instead of just one. If
                         'maintain-quorum' is set to False, then we will
                         thrash up to as many monitors as there are
                         available. (default: False)
-    maintain-quorum     Always maintain quorum, taking care on how many
+    maintain_quorum     Always maintain quorum, taking care on how many
                         monitors we kill during the thrashing. If we
                         happen to only have one or two monitors configured,
                         if this option is set to True, then we won't run
@@ -50,6 +50,10 @@ class MonitorThrasher:
                         quorum. Setting it to false however would allow the
                         task to run with as many as just one single monitor.
                         (default: True)
+    freeze_mon_probability: how often to freeze the mon instead of killing it,
+                        in % (default: 0)
+    freeze_mon_duration: how many seconds to freeze the mon (default: 15)
+    scrub               Scrub after each iteration (default: True)
 
     Note: if 'store-thrash' is set to True, then 'maintain-quorum' must also
           be set to True.
@@ -61,11 +65,11 @@ class MonitorThrasher:
     - mon_thrash:
         revive_delay: 20
         thrash_delay: 1
-        store-thrash: true
-        store-thrash-probability: 40
+        thrash_store: true
+        thrash_store_probability: 40
         seed: 31337
-        maintain-quorum: true
-        thrash-many: true
+        maintain_quorum: true
+        thrash_many: true
     - ceph-fuse:
     - workunit:
         clients:
@@ -97,21 +101,26 @@ class MonitorThrasher:
     self.revive_delay = float(self.config.get('revive_delay', 10.0))
     self.thrash_delay = float(self.config.get('thrash_delay', 0.0))
 
-    self.thrash_many = self.config.get('thrash-many', False)
-    self.maintain_quorum = self.config.get('maintain-quorum', True)
+    self.thrash_many = self.config.get('thrash_many', False)
+    self.maintain_quorum = self.config.get('maintain_quorum', True)
+
+    self.scrub = self.config.get('scrub', True)
+
+    self.freeze_mon_probability = float(self.config.get('freeze_mon_probability', 10))
+    self.freeze_mon_duration = float(self.config.get('freeze_mon_duration', 15.0))
 
     assert self.max_killable() > 0, \
         'Unable to kill at least one monitor with the current config.'
 
     """ Store thrashing """
-    self.store_thrash = self.config.get('store-thrash', False)
+    self.store_thrash = self.config.get('store_thrash', False)
     self.store_thrash_probability = int(
-        self.config.get('store-thrash-probability', 50))
+        self.config.get('store_thrash_probability', 50))
     if self.store_thrash:
       assert self.store_thrash_probability > 0, \
-          'store-thrash is set, probability must be > 0'
+          'store_thrash is set, probability must be > 0'
       assert self.maintain_quorum, \
-          'store-thrash = true must imply maintain-quorum = true'
+          'store_thrash = true must imply maintain_quorum = true'
 
     self.thread = gevent.spawn(self.do_thrash)
 
@@ -125,7 +134,7 @@ class MonitorThrasher:
   def should_thrash_store(self):
     if not self.store_thrash:
       return False
-    return self.rng.randrange(0,101) >= self.store_thrash_probability
+    return self.rng.randrange(0,101) < self.store_thrash_probability
 
   def thrash_store(self, mon):
     addr = self.ctx.ceph.conf['mon.%s' % mon]['mon addr']
@@ -135,6 +144,17 @@ class MonitorThrasher:
     assert j['ret'] == 0, \
         'error forcing store sync on mon.{id}:\n{ret}'.format(
             id=mon,ret=out)
+
+  def should_freeze_mon(self):
+    return self.rng.randrange(0,101) < self.freeze_mon_probability
+
+  def freeze_mon(self, mon):
+    log.info('Sending STOP to mon %s', mon)
+    self.manager.signal_mon(mon, 19)  # STOP
+
+  def unfreeze_mon(self, mon):
+    log.info('Sending CONT to mon %s', mon)
+    self.manager.signal_mon(mon, 18)  # CONT
 
   def kill_mon(self, mon):
     self.log('killing mon.{id}'.format(id=mon))
@@ -154,11 +174,14 @@ class MonitorThrasher:
   def do_thrash(self):
     self.log('start thrashing')
     self.log('seed: {s}, revive delay: {r}, thrash delay: {t} '\
-        'thrash many: {tm}, maintain quorum: {mq} '\
-        'store thrash: {st}, probability: {stp}'.format(
+               'thrash many: {tm}, maintain quorum: {mq} '\
+               'store thrash: {st}, probability: {stp} '\
+               'freeze mon: prob {fp} duration {fd}'.format(
           s=self.random_seed,r=self.revive_delay,t=self.thrash_delay,
           tm=self.thrash_many, mq=self.maintain_quorum,
-          st=self.store_thrash,stp=self.store_thrash_probability))
+          st=self.store_thrash,stp=self.store_thrash_probability,
+          fp=self.freeze_mon_probability,fd=self.freeze_mon_duration,
+          ))
 
     while not self.stopping:
       mons = _get_mons(self.ctx)
@@ -173,6 +196,14 @@ class MonitorThrasher:
       mons_to_kill = self.rng.sample(mons, kill_up_to)
       self.log('monitors to thrash: {m}'.format(m=mons_to_kill))
 
+      mons_to_freeze = []
+      for mon in mons:
+        if mon in mons_to_kill:
+          continue
+        if self.should_freeze_mon():
+          mons_to_freeze.append(mon)
+      self.log('monitors to freeze: {m}'.format(m=mons_to_freeze))
+
       for mon in mons_to_kill:
         self.log('thrashing mon.{m}'.format(m=mon))
 
@@ -181,6 +212,15 @@ class MonitorThrasher:
           self.thrash_store(mon)
 
         self.kill_mon(mon)
+
+      if mons_to_freeze:
+        for mon in mons_to_freeze:
+          self.freeze_mon(mon)
+        self.log('waiting for {delay} secs to unfreeze mons'.format(
+            delay=self.freeze_mon_duration))
+        time.sleep(self.freeze_mon_duration)
+        for mon in mons_to_freeze:
+          self.unfreeze_mon(mon)
 
       if self.maintain_quorum:
         self.manager.wait_for_mon_quorum_size(len(mons)-len(mons_to_kill))
@@ -198,11 +238,28 @@ class MonitorThrasher:
       for mon in mons_to_kill:
         self.revive_mon(mon)
 
+      # do more freezes
+      if mons_to_freeze:
+        for mon in mons_to_freeze:
+          self.freeze_mon(mon)
+        self.log('waiting for {delay} secs to unfreeze mons'.format(
+            delay=self.freeze_mon_duration))
+        time.sleep(self.freeze_mon_duration)
+        for mon in mons_to_freeze:
+          self.unfreeze_mon(mon)
+
       self.manager.wait_for_mon_quorum_size(len(mons))
       for m in mons:
         s = self.manager.get_mon_status(m)
         assert s['state'] == 'leader' or s['state'] == 'peon'
         assert len(s['quorum']) == len(mons)
+
+      if self.scrub:
+        self.log('triggering scrub')
+        try:
+          self.manager.raw_cluster_cmd('scrub')
+        except:
+          pass
 
       if self.thrash_delay > 0.0:
         self.log('waiting for {delay} secs before continuing thrashing'.format(

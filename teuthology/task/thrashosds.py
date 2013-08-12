@@ -71,12 +71,17 @@ def task(ctx, config):
     chance_inject_pause_short: (1) chance of injecting short stall
     chance_inject_pause_long: (0) chance of injecting long stall
 
+    clean_wait: (0) duration to wait before resuming thrashing once clean
+
     powercycle: (false) whether to power cycle the node instead
         of just the osd process. Note that this assumes that a single
         osd is the only important process on the node.
 
     chance_test_backfill_full: (0) chance to simulate full disks stopping
         backfill
+
+    chance_test_map_discontinuity: (0) chance to test map discontinuity
+    map_discontinuity_sleep_time: (40) time to wait for map trims
 
     example:
 
@@ -96,12 +101,16 @@ def task(ctx, config):
 
     if 'powercycle' in config:
 
+        # sync everyone first to avoid collateral damage to / etc.
+        log.info('Doing preliminary sync to avoid collateral damage...')
+        ctx.cluster.run(args=['sync'])
+
         if 'ipmi_user' in ctx.teuthology_config:
             for t, key in ctx.config['targets'].iteritems():
                 host = t.split('@')[-1]
                 shortname = host.split('.')[0]
                 from ..orchestra import remote as oremote
-                console = oremote.RemoteConsole(
+                console = oremote.getRemoteConsole(
                     name=host,
                     ipmiuser=ctx.teuthology_config['ipmi_user'],
                     ipmipass=ctx.teuthology_config['ipmi_password'],

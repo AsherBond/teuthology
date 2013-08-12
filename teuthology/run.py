@@ -63,6 +63,11 @@ def parse_args():
         help='Type of machine to lock/run tests on.',
         )
     parser.add_argument(
+        '--os-type',
+        default='ubuntu',
+        help='Distro/OS of machine to run test on.',
+        )
+    parser.add_argument(
         '--block',
         action='store_true',
         default=False,
@@ -166,7 +171,10 @@ def main():
             {'internal.vm_setup': None},
             ])
     if 'kernel' in ctx.config:
-        init_tasks.append({'kernel': ctx.config['kernel']})
+        from teuthology.misc import get_distro
+        distro = get_distro(ctx)
+        if distro == 'ubuntu':
+            init_tasks.append({'kernel': ctx.config['kernel']})
     init_tasks.extend([
             {'internal.base': None},
             {'internal.archive': None},
@@ -264,9 +272,9 @@ def schedule():
         help='be more verbose',
         )
     parser.add_argument(
-        '-b', '--branch',
-        default='master',
-        help='which branch of teuthology to use',
+        '-w', '--worker',
+        default='plana',
+        help='which worker to use (type of machine)',
         )
     parser.add_argument(
         '-s', '--show',
@@ -289,9 +297,7 @@ def schedule():
     import teuthology.queue
     beanstalk = teuthology.queue.connect(ctx)
 
-    tube = 'teuthology'
-    if ctx.branch != 'master':
-        tube += '-' + ctx.branch
+    tube=ctx.worker
     beanstalk.use(tube)
 
     if ctx.show:

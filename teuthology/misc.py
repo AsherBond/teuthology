@@ -23,6 +23,7 @@ import datetime
 stamp = datetime.datetime.now().strftime("%y%m%d%H%M")
 global_jobid = None
 checked_jobid = False
+is_vm = lambda x: x.startswith('vpm') or x.startswith('ubuntu@vpm')
 
 def get_testdir(ctx):
     if 'test_path' in ctx.teuthology_config:
@@ -175,7 +176,7 @@ def generate_caps(type_):
             ),
         client=dict(
             mon='allow rw',
-            osd='allow rwx pool data, allow rwx pool rbd, allow rwx pool newpool',
+            osd='allow rwx',
             mds='allow',
             ),
         )
@@ -271,7 +272,7 @@ def create_simple_monmap(ctx, remote, conf):
 
     testdir = get_testdir(ctx)
     args = [
-        '{tdir}/enable-coredump'.format(tdir=testdir),
+        '{tdir}/adjust-ulimits'.format(tdir=testdir),
         'ceph-coverage',
         '{tdir}/archive/coverage'.format(tdir=testdir),
         'monmaptool',
@@ -361,12 +362,14 @@ def move_file(remote, from_path, to_path, sudo=False):
         stdout=StringIO(),
         )
 
-def delete_file(remote, path, sudo=False):
+def delete_file(remote, path, sudo=False, force=False):
     args = []
     if sudo:
         args.append('sudo')
+    args.extend(['rm'])
+    if force:
+        args.extend(['-f'])
     args.extend([
-            'rm',
             '--',
             path,
             ])
@@ -600,7 +603,13 @@ def get_scratch_devices(remote):
                 args=['ls', run.Raw('/dev/[sv]d?')],
                 stdout=StringIO()
                 )
-        devs = r.stdout.getvalue().split('\n')
+        devs = r.stdout.getvalue().strip().split('\n')
+
+    #Remove root device (vm guests) from the disk list
+    for dev in devs:
+        if 'vda' in dev:
+            devs.remove(dev)
+            log.warn("Removing root device: %s from device list" % dev)
 
     log.debug('devs={d}'.format(d=devs))
 
@@ -634,12 +643,11 @@ def wait_until_healthy(ctx, remote):
     while True:
         r = remote.run(
             args=[
-                '{tdir}/enable-coredump'.format(tdir=testdir),
+                '{tdir}/adjust-ulimits'.format(tdir=testdir),
                 'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'ceph',
                 'health',
-                '--concise',
                 ],
             stdout=StringIO(),
             logger=log.getChild('health'),
@@ -657,11 +665,10 @@ def wait_until_osds_up(ctx, cluster, remote):
     while True:
         r = remote.run(
             args=[
-                '{tdir}/enable-coredump'.format(tdir=testdir),
+                '{tdir}/adjust-ulimits'.format(tdir=testdir),
                 'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'ceph',
-                '--concise',
                 'osd', 'dump', '--format=json'
                 ],
             stdout=StringIO(),
@@ -727,10 +734,11 @@ def reconnect(ctx, timeout, remotes=None):
         for remote in need_reconnect:
             try:
                 log.info('trying to connect to %s', remote.name)
+                key = ctx.config['targets'][remote.name]
                 from .orchestra import connection
                 remote.ssh = connection.connect(
                     user_at_host=remote.name,
-                    host_key=ctx.config['targets'][remote.name],
+                    host_key=key,
                     keep_alive=True,
                     )
             except Exception:
@@ -746,7 +754,7 @@ def write_secret_file(ctx, remote, role, keyring, filename):
     testdir = get_testdir(ctx)
     remote.run(
         args=[
-            '{tdir}/enable-coredump'.format(tdir=testdir),
+            '{tdir}/adjust-ulimits'.format(tdir=testdir),
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir),
             'ceph-authtool',
@@ -865,3 +873,33 @@ def stop_daemons_of_type(ctx, type_):
             log.exception('Saw exception from %s.%s', daemon.role, daemon.id_)
     if exc_info != (None, None, None):
         raise exc_info[0], exc_info[1], exc_info[2]
+
+def get_system_type(remote):
+    """
+    Return this system type (deb or rpm)
+    """
+    r = remote.run(
+        args=[
+            'sudo','lsb_release', '-is',
+        ],
+    stdout=StringIO(),
+    )
+    system_value = r.stdout.getvalue().strip()
+    log.debug("System to be installed: %s" % system_value)
+    if system_value in ['Ubuntu','Debian']:
+        return "deb"
+    if system_value in ['CentOS','Fedora','RedHatEnterpriseServer']:
+        return "rpm"
+    return system_value
+
+def get_distro(ctx):
+    try:
+        os_type = ctx.config.get('os_type', ctx.os_type)
+    except AttributeError:
+        os_type = 'ubuntu'
+    try:
+        return ctx.config['downburst'].get('distro', os_type)
+    except KeyError:
+        return os_type
+    except AttributeError:
+        return ctx.os_type

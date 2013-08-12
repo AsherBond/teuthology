@@ -33,10 +33,6 @@ def task(ctx, config):
     """
     Test the dump_stuck command.
 
-    The ceph configuration should include::
-
-        mon_osd_report_timeout = 90
-        mon_pg_stuck_threshold = 10
     """
     assert config is None, \
         'dump_stuck requires no configuration'
@@ -56,6 +52,10 @@ def task(ctx, config):
     manager.raw_cluster_cmd('tell', 'osd.0', 'flush_pg_stats')
     manager.raw_cluster_cmd('tell', 'osd.1', 'flush_pg_stats')
     manager.wait_for_clean(timeout)
+
+    manager.raw_cluster_cmd('tell', 'mon.0', 'injectargs', '--',
+#                            '--mon-osd-report-timeout 90',
+                            '--mon-pg-stuck-threshold 10')
 
     check_stuck(
         manager,
@@ -112,9 +112,14 @@ def task(ctx, config):
     for id_ in teuthology.all_roles_of_type(ctx.cluster, 'osd'):
         manager.revive_osd(id_)
         manager.mark_in_osd(id_)
-    time.sleep(timeout)
-    manager.raw_cluster_cmd('tell', 'osd.0', 'flush_pg_stats')
-    manager.raw_cluster_cmd('tell', 'osd.1', 'flush_pg_stats')
+    while True:
+        try:
+            manager.raw_cluster_cmd('tell', 'osd.0', 'flush_pg_stats')
+            manager.raw_cluster_cmd('tell', 'osd.1', 'flush_pg_stats')
+            break
+        except:
+            log.debug('osds must not be started yet, waiting...')
+            time.sleep(1)
     manager.wait_for_clean(timeout)
 
     check_stuck(

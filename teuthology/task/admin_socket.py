@@ -68,18 +68,25 @@ def _socket_command(ctx, remote, socket_path, command, args):
     """
     json_fp = StringIO()
     testdir = teuthology.get_testdir(ctx)
-    remote.run(
-        args=[
-            'sudo',
-            '{tdir}/enable-coredump'.format(tdir=testdir),
-            'ceph-coverage',
-            '{tdir}/archive/coverage'.format(tdir=testdir),
-            'ceph',
-            '--admin-daemon', socket_path,
-            command,
-            ] + args,
-        stdout=json_fp,
-        )
+    max_tries = 60
+    while True:
+        proc = remote.run(
+            args=[
+                'sudo',
+                '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                'ceph-coverage',
+                '{tdir}/archive/coverage'.format(tdir=testdir),
+                'ceph',
+                '--admin-daemon', socket_path,
+                ] + command.split(' ') + args,
+            stdout=json_fp,
+            )
+        if proc.exitstatus == 0:
+            break
+        assert max_tries > 0
+        max_tries -= 1
+        log.info('ceph cli returned an error, command not registered yet?  sleeping and retrying ...')
+        time.sleep(1)
     out = json_fp.getvalue()
     json_fp.close()
     log.debug('admin socket command %s returned %s', command, out)
@@ -90,6 +97,7 @@ def _run_tests(ctx, client, tests):
     log.debug('Running admin socket tests on %s', client)
     (remote,) = ctx.cluster.only(client).remotes.iterkeys()
     socket_path = '/var/run/ceph/ceph-{name}.asok'.format(name=client)
+    overrides = ctx.config.get('overrides', {}).get('admin_socket', {})
 
     try:
         tmp_dir = os.path.join(
@@ -111,10 +119,14 @@ def _run_tests(ctx, client, tests):
         for command, config in tests.iteritems():
             if config is None:
                 config = {}
+            teuthology.deep_merge(config, overrides)
             log.debug('Testing %s with config %s', command, str(config))
 
             test_path = None
             if 'test' in config:
+                url = config['test'].format(
+                    branch=config.get('branch', 'master')
+                    )
                 test_path = os.path.join(tmp_dir, command)
                 remote.run(
                     args=[
@@ -123,7 +135,7 @@ def _run_tests(ctx, client, tests):
                         '-O',
                         test_path,
                         '--',
-                        config['test'],
+                        url,
                         run.Raw('&&'),
                         'chmod',
                         'u=rx',

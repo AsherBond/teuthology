@@ -71,10 +71,11 @@ def create_users(ctx, config):
             _config_user(s3tests_conf, section, '{user}.{client}'.format(user=user, client=client))
             ctx.cluster.only(client).run(
                 args=[
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     '{tdir}/archive/coverage'.format(tdir=testdir),
                     'radosgw-admin',
+                    '-n', client,
                     'user', 'create',
                     '--uid', s3tests_conf[section]['user_id'],
                     '--display-name', s3tests_conf[section]['display_name'],
@@ -91,10 +92,11 @@ def create_users(ctx, config):
                 uid = '{user}.{client}'.format(user=user, client=client)
                 ctx.cluster.only(client).run(
                     args=[
-                        '{tdir}/enable-coredump'.format(tdir=testdir),
+                        '{tdir}/adjust-ulimits'.format(tdir=testdir),
                         'ceph-coverage',
                         '{tdir}/archive/coverage'.format(tdir=testdir),
                         'radosgw-admin',
+                        '-n', client,
                         'user', 'rm',
                         '--uid', uid,
                         '--purge-data',

@@ -276,6 +276,7 @@ def _run_tests(ctx, refspec, role, tests, env, subdir=None):
                     run.Raw('&&'),
                     'cd', '--', scratch_tmp,
                     run.Raw('&&'),
+                    run.Raw('CEPH_CLI_TEST_DUP_COMMAND=1'),
                     run.Raw('CEPH_REF={ref}'.format(ref=refspec)),
                     run.Raw('TESTDIR="{tdir}"'.format(tdir=testdir)),
                     run.Raw('CEPH_ID="{id}"'.format(id=id_)),
@@ -287,7 +288,7 @@ def _run_tests(ctx, refspec, role, tests, env, subdir=None):
                         env_arg = '{var}={val}'.format(var=var, val=quoted_val)
                         args.append(run.Raw(env_arg))
                 args.extend([
-                        '{tdir}/enable-coredump'.format(tdir=testdir),
+                        '{tdir}/adjust-ulimits'.format(tdir=testdir),
                         'ceph-coverage',
                         '{tdir}/archive/coverage'.format(tdir=testdir),
                         '{srcdir}/{workunit}'.format(

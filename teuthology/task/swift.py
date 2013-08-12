@@ -59,10 +59,11 @@ def create_users(ctx, config):
             _config_user(testswift_conf, '{user}.{client}'.format(user=user, client=client), user, suffix)
             ctx.cluster.only(client).run(
                 args=[
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     '{tdir}/archive/coverage'.format(tdir=testdir),
                     'radosgw-admin',
+                    '-n', client,
                     'user', 'create',
                     '--subuser', '{account}:{user}'.format(account=testswift_conf['func_test']['account{s}'.format(s=suffix)],user=user),
                     '--display-name', testswift_conf['func_test']['display_name{s}'.format(s=suffix)],
@@ -79,10 +80,11 @@ def create_users(ctx, config):
                 uid = '{user}.{client}'.format(user=user, client=client)
                 ctx.cluster.only(client).run(
                     args=[
-                        '{tdir}/enable-coredump'.format(tdir=testdir),
+                        '{tdir}/adjust-ulimits'.format(tdir=testdir),
                         'ceph-coverage',
                         '{tdir}/archive/coverage'.format(tdir=testdir),
                         'radosgw-admin',
+                        '-n', client,
                         'user', 'rm',
                         '--uid', uid,
                         '--purge-data',

@@ -15,6 +15,7 @@ import boto.s3.acl
 import time
 
 from teuthology import misc as teuthology
+from teuthology.task_util.rgw import rgwadmin
 
 log = logging.getLogger(__name__)
 
@@ -24,37 +25,6 @@ def successful_ops(out):
         return 0
     entry = summary[0]
     return entry['total']['successful_ops']
-
-def rgwadmin(ctx, client, cmd):
-    log.info('radosgw-admin: %s' % cmd)
-    testdir = teuthology.get_testdir(ctx)
-    pre = [
-        '{tdir}/enable-coredump'.format(tdir=testdir),
-        'ceph-coverage'.format(tdir=testdir),
-        '{tdir}/archive/coverage'.format(tdir=testdir),
-        'radosgw-admin'.format(tdir=testdir),
-        '--log-to-stderr',
-        '--format', 'json',
-        ]
-    pre.extend(cmd)
-    (remote,) = ctx.cluster.only(client).remotes.iterkeys()
-    proc = remote.run(
-        args=pre,
-        check_status=False,
-        stdout=StringIO(),
-        stderr=StringIO(),
-        )
-    r = proc.exitstatus
-    out = proc.stdout.getvalue()
-    j = None
-    if not r and out != '':
-        try:
-            j = json.loads(out)
-            log.info(' json result: %s' % j)
-        except ValueError:
-            j = out
-            log.info(' raw result: %s' % j)
-    return (r, j)
 
 def task(ctx, config):
     """
@@ -271,6 +241,12 @@ def task(ctx, config):
     assert len(out) == 1
     assert out[0] == bucket_name
 
+    # TESTCASE 'bucket-list-all','bucket','list','all buckets','succeeds, expected list'
+    (err, out) = rgwadmin(ctx, client, ['bucket', 'list'])
+    assert not err
+    assert len(out) >= 1
+    assert bucket_name in out;
+
     # TESTCASE 'max-bucket-limit,'bucket','create','4 buckets','5th bucket fails due to max buckets == 4'
     bucket2 = connection.create_bucket(bucket_name + '2')
     bucket3 = connection.create_bucket(bucket_name + '3')
@@ -349,15 +325,13 @@ def task(ctx, config):
     (err, out) = rgwadmin(ctx, client, ['bucket', 'link', '--uid', user2, '--bucket', bucket_name])
     assert not err
 
-    # try creating an object with the first user which should cause an error
-    key = boto.s3.key.Key(bucket)
+    # try to remove user, should fail (has a linked bucket)
+    (err, out) = rgwadmin(ctx, client, ['user', 'rm', '--uid', user2])
+    assert err
 
-    try:
-        key.set_contents_from_string('three')
-    except boto.exception.S3ResponseError:
-        denied = True
-
-    assert denied
+    # TESTCASE 'bucket unlink', 'bucket', 'unlink', 'unlink bucket from user', 'succeeds, bucket unlinked'
+    (err, out) = rgwadmin(ctx, client, ['bucket', 'unlink', '--uid', user2, '--bucket', bucket_name])
+    assert not err
 
     # relink the bucket to the first user and delete the second user
     (err, out) = rgwadmin(ctx, client, ['bucket', 'link', '--uid', user1, '--bucket', bucket_name])
@@ -576,7 +550,7 @@ def task(ctx, config):
     (err, out) = rgwadmin(ctx, client, ['user', 'rm', '--uid', user1])
     assert err
 
-    # TESTCASE 'rm-user2', 'user', 'rm', user with data', 'succeeds'
+    # TESTCASE 'rm-user2', 'user', 'rm', 'user with data', 'succeeds'
     bucket = connection.create_bucket(bucket_name)
     key = boto.s3.key.Key(bucket)
     key.set_contents_from_string('twelve')
@@ -588,24 +562,21 @@ def task(ctx, config):
     (err, out) = rgwadmin(ctx, client, ['user', 'info', '--uid', user1])
     assert err
 
-    # TESTCASE 'pool-rm', 'pool', 'rm', 'make default pool unavailable', 'succeeds'
-    default_pool='.rgw.buckets'
-    (err, out) = rgwadmin(ctx, client, ['pool', 'rm', '--pool', default_pool])
+    # TESTCASE 'zone-info', 'zone', 'get', 'get zone info', 'succeeds, has default placement rule'
+    (err, out) = rgwadmin(ctx, client, ['zone', 'get'])
+    assert len(out) > 0
+    assert len(out['placement_pools']) == 1
 
-    # now list the pools
-    (err, out) = rgwadmin(ctx, client, ['pools', 'list'])
+    default_rule = out['placement_pools'][0]
+    assert default_rule['key'] == 'default-placement'
 
-    assert len(out) == 0
+    rule={'key': 'new-placement', 'val': {'data_pool': '.rgw.buckets.2', 'index_pool': '.rgw.buckets.index.2'}}
 
-    # TESTCASE 'pool-add', 'pool', 'add', 'make default pool available', 'succeeds'
-    (err, out) = rgwadmin(ctx, client, ['pool', 'add', '--pool', default_pool])
+    out['placement_pools'].append(rule)
 
+    (err, out) = rgwadmin(ctx, client, ['zone', 'set'], stdin=StringIO(json.dumps(out)))
     assert not err
 
-    (err, out) = rgwadmin(ctx, client, ['pools', 'list'])
-    assert out[0]['name'] == default_pool
-
-    # TESTCASE 'zone-info', 'zone', 'info', 'get zone info', 'succeeds'
-    (err, out) = rgwadmin(ctx, client, ['zone', 'info'])
-
+    (err, out) = rgwadmin(ctx, client, ['zone', 'get'])
     assert len(out) > 0
+    assert len(out['placement_pools']) == 2

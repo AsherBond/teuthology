@@ -10,6 +10,8 @@
 	osd crush chooseleaf type = 0
         auth debug = true
 
+	ms die on old message = true
+
 [osd]
         osd journal size = 100
 
@@ -20,6 +22,9 @@
 	osd recovery max chunk = 1048576
 
         osd debug op order = true
+        osd debug verify stray on activate = true
+
+	osd open classes on start = true
 
 [mon]
 	debug ms = 1
@@ -34,7 +39,6 @@
         mds debug frag = true
 
 [client]
-        rgw socket path = {testdir}/apache/tmp/fastcgi_sock/rgw_sock
         rgw cache enabled = true
 	rgw enable ops log = true
 	rgw enable usage log = true

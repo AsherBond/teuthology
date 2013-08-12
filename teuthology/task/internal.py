@@ -103,9 +103,20 @@ def lock_machines(ctx, config):
             if vmlist:
                 log.info('Waiting for virtual machines to come up')
                 keyscan_out = ''
-                while not keyscan_out:
+                loopcount=0
+                while len(keyscan_out.splitlines()) != len(vmlist):
+                    loopcount += 1
                     time.sleep(10)
                     keyscan_out, current_locks = lock.keyscan_check(ctx, vmlist)
+                    log.info('virtual machine is stil unavailable')
+                    if loopcount == 40:
+                        loopcount = 0
+                        log.info('virtual machine(s) still not up, recreating unresponsive ones.')
+                        for guest in vmlist:
+                            if guest not in keyscan_out:
+                                log.info('recreating: ' + guest)
+                                lock.destroy_if_vm(ctx, 'ubuntu@' + guest)
+                                lock.create_if_vm(ctx, 'ubuntu@' + guest)
                 if lock.update_keys(ctx, keyscan_out, current_locks):
                     log.info("Error in virtual machine keys")
                 newscandict = {}
@@ -172,8 +183,20 @@ def connect(ctx, config):
     from ..orchestra import connection, remote
     from ..orchestra import cluster
     remotes = []
+    machs = []
+    for name in ctx.config['targets'].iterkeys():
+        machs.append(name)
     for t, key in ctx.config['targets'].iteritems():
         log.debug('connecting to %s', t)
+        try:
+            if ctx.config['sshkeys'] == 'ignore':
+                key = None
+        except (AttributeError, KeyError):
+            pass
+        for machine in ctx.config['targets'].iterkeys():
+            if teuthology.is_vm(machine):
+                key = None
+                break
         remotes.append(
             remote.Remote(name=t,
                           ssh=connection.connect(user_at_host=t,
@@ -492,16 +515,16 @@ def vm_setup(ctx, config):
     Look for virtual machines and handle their initialization
     """
     with parallel() as p:
-        editinfo = './teuthology/task/edit_sudoers.sh'
+        editinfo = os.path.join(os.path.dirname(__file__),'edit_sudoers.sh')
         for remote in ctx.cluster.remotes.iterkeys():
             mname = re.match(".*@([^\.]*)\..*", str(remote)).group(1) 
-            if mname[0:3] == 'vpm':
+            if teuthology.is_vm(mname):
                 r = remote.run(args=['test', '-e', '/ceph-qa-ready',],
                         stdout=StringIO(),
                         check_status=False,)
                 if r.exitstatus != 0:
                     p1 = subprocess.Popen(['cat', editinfo], stdout=subprocess.PIPE)
-                    p2 = subprocess.Popen(['ssh','-t','-t',str(remote)],stdin=p1.stdout, stdout=subprocess.PIPE)
+                    p2 = subprocess.Popen(['ssh','-t','-t',str(remote), 'sudo', 'sh'],stdin=p1.stdout, stdout=subprocess.PIPE)
                     _,err = p2.communicate()
                     if err:
                         log.info("Edit of /etc/sudoers failed: %s",err)
@@ -510,7 +533,7 @@ def vm_setup(ctx, config):
 def _handle_vm_init(remote):
     log.info('Running ceph_qa_chef on ', remote)
     remote.run(args=['wget','-q','-O-',
-            'https://raw.github.com/ceph/ceph-qa-chef/master/solo/solo-from-scratch',
+            'http://ceph.com/git/?p=ceph-qa-chef.git;a=blob_plain;f=solo/solo-from-scratch;hb=HEAD',
             run.Raw('|'),
             'sh',
         ])

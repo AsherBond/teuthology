@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import logging
 import os
+import struct
 
 from teuthology import misc as teuthology
 from teuthology import contextutil
@@ -63,6 +64,9 @@ class DaemonState(object):
         self.proc = self.remote.run(*cmd_args, **cmd_kwargs)
         self.log.info('Started')
 
+    def signal(self, sig):
+        self.proc.stdin.write(struct.pack('!b', sig))
+        self.log.info('Sent signal %d', sig)
 
     def running(self):
         return self.proc is not None
@@ -104,9 +108,19 @@ def ceph_log(ctx, config):
         ctx.cluster.run(
             args=[
                 'sudo',
-                'chmod',
-                '777',
+                'install', '-d', '-m0755', '--',
                 '/var/log/ceph',
+                ],
+            wait=False,
+            )
+        )
+    log.info('Disabling ceph logrotate...')
+    run.wait(
+        ctx.cluster.run(
+            args=[
+                'sudo',
+                'rm', '-f', '--',
+                '/etc/logrotate.d/ceph',
                 ],
             wait=False,
             )
@@ -133,7 +147,7 @@ def ceph_log(ctx, config):
 @contextlib.contextmanager
 def ship_utilities(ctx, config):
     assert config is None
-    FILES = ['daemon-helper', 'enable-coredump', 'chdir-coredump',
+    FILES = ['daemon-helper', 'adjust-ulimits', 'chdir-coredump',
              'valgrind.supp', 'kcon_most']
     testdir = teuthology.get_testdir(ctx)
     for filename in FILES:
@@ -181,26 +195,26 @@ def assign_devs(roles, devs):
 
 @contextlib.contextmanager
 def valgrind_post(ctx, config):
-    testdir = teuthology.get_testdir(ctx)
     try:
         yield
     finally:
         lookup_procs = list()
-        val_path = '/var/log/ceph/valgrind'.format(tdir=testdir)
         log.info('Checking for errors in any valgrind logs...');
         for remote in ctx.cluster.remotes.iterkeys():
             #look at valgrind logs for each node
             proc = remote.run(
                 args=[
                     'sudo',
-                    'grep', '-r', '<kind>',
-                    run.Raw(val_path),
+                    'zgrep',
+                    '<kind>',
+                    run.Raw('/var/log/ceph/valgrind/*'),
+                    '/dev/null', # include a second file so that we always get a filename prefix on the output
                     run.Raw('|'),
                     'sort',
                     run.Raw('|'),
                     'uniq',
                     ],
-                wait = False,
+                wait=False,
                 check_status=False,
                 stdout=StringIO(),
                 )
@@ -208,13 +222,18 @@ def valgrind_post(ctx, config):
 
         valgrind_exception = None
         for (proc, remote) in lookup_procs:
+            proc.exitstatus.get()
             out = proc.stdout.getvalue()
             for line in out.split('\n'):
                 if line == '':
                     continue
-                (file, kind) = line.split(':')
+                try:
+                    (file, kind) = line.split(':')
+                except:
+                    log.error('failed to split line %s', line)
+                    raise
                 log.debug('file %s kind %s', file, kind)
-                if file.find('mds') >= 0 and kind.find('Lost') > 0:
+                if (file.find('mds') >= 0) and kind.find('Lost') > 0:
                     continue
                 log.error('saw valgrind issue %s in %s', kind, file)
                 valgrind_exception = Exception('saw valgrind issues')
@@ -376,7 +395,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/enable-coredump'.format(tdir=testdir),
+            '{tdir}/adjust-ulimits'.format(tdir=testdir),
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -387,7 +406,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/enable-coredump'.format(tdir=testdir),
+            '{tdir}/adjust-ulimits'.format(tdir=testdir),
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -415,7 +434,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/enable-coredump'.format(tdir=testdir),
+            '{tdir}/adjust-ulimits'.format(tdir=testdir),
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -459,7 +478,7 @@ def cluster(ctx, config):
     run.wait(
         mons.run(
             args=[
-                '{tdir}/enable-coredump'.format(tdir=testdir),
+                '{tdir}/adjust-ulimits'.format(tdir=testdir),
                 'ceph-coverage',
                 coverage_dir,
                 'osdmaptool',
@@ -487,7 +506,7 @@ def cluster(ctx, config):
                     '-p',
                     '/var/lib/ceph/mds/ceph-{id}'.format(id=id_),
                     run.Raw('&&'),
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     coverage_dir,
                     'sudo',
@@ -531,7 +550,7 @@ def cluster(ctx, config):
                 mkfs_options = config.get('mkfs_options')
                 mount_options = config.get('mount_options')
                 if fs == 'btrfs':
-                    package = 'btrfs-tools'
+                    #package = 'btrfs-tools'
                     if mount_options is None:
                         mount_options = ['noatime','user_subvol_rm_allowed']
                     if mkfs_options is None:
@@ -539,7 +558,7 @@ def cluster(ctx, config):
                                         '-l', '32768',
                                         '-n', '32768']
                 if fs == 'xfs':
-                    package = 'xfsprogs'
+                    #package = 'xfsprogs'
                     if mount_options is None:
                         mount_options = ['noatime']
                     if mkfs_options is None:
@@ -591,7 +610,7 @@ def cluster(ctx, config):
             remote.run(
                 args=[
                     'MALLOC_CHECK_=3',
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     coverage_dir,
                     'sudo',
@@ -648,7 +667,7 @@ def cluster(ctx, config):
             mons.run(
                 args=[
                     'sudo',
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     coverage_dir,
                     'ceph-authtool',
@@ -675,7 +694,7 @@ def cluster(ctx, config):
                 )
             remote.run(
                 args=[
-                    '{tdir}/enable-coredump'.format(tdir=testdir),
+                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
                     'ceph-coverage',
                     coverage_dir,
                     'sudo',
@@ -854,7 +873,7 @@ def run_daemon(ctx, config, type_):
                 num_active += 1
 
             run_cmd = [
-                '{tdir}/enable-coredump'.format(tdir=testdir),
+                '{tdir}/adjust-ulimits'.format(tdir=testdir),
                 'ceph-coverage',
                 coverage_dir,
                 'sudo',
@@ -892,7 +911,7 @@ def run_daemon(ctx, config, type_):
         (mon0_remote,) = ctx.cluster.only(firstmon).remotes.keys()
 
         mon0_remote.run(args=[
-            '{tdir}/enable-coredump'.format(tdir=testdir),
+            '{tdir}/adjust-ulimits'.format(tdir=testdir),
             'ceph-coverage',
             coverage_dir,
             'ceph',
@@ -917,6 +936,39 @@ def healthy(ctx, config):
         remote=mon0_remote,
         )
 
+def wait_for_osds_up(ctx, config):
+    log.info('Waiting until ceph osds are all up...')
+    firstmon = teuthology.get_first_mon(ctx, config)
+    (mon0_remote,) = ctx.cluster.only(firstmon).remotes.keys()
+    teuthology.wait_until_osds_up(
+        ctx,
+        cluster=ctx.cluster,
+        remote=mon0_remote
+        )
+
+def wait_for_mon_quorum(ctx, config):
+    import json
+    import time
+
+    assert isinstance(config, list)
+    firstmon = teuthology.get_first_mon(ctx, config)
+    (remote,) = ctx.cluster.only(firstmon).remotes.keys()
+    while True:
+        r = remote.run(
+            args=[
+                'ceph',
+                'quorum_status',
+                ],
+            stdout=StringIO(),
+            logger=log.getChild('quorum_status'),
+            )
+        j = json.loads(r.stdout.getvalue())
+        q = j.get('quorum_names', [])
+        log.debug('Quorum: %s', q)
+        if sorted(q) == sorted(config):
+            break
+        time.sleep(1)
+
 
 @contextlib.contextmanager
 def restart(ctx, config):
@@ -931,29 +983,39 @@ def restart(ctx, config):
       tasks:
       - ceph.restart: [osd.0, mon.1]
 
+   or::
+
+      tasks:
+      - ceph.restart:
+          daemons: [osd.0, mon.1]
+          wait-for-healthy: false
+          wait-for-osds-up: true
+
    """
    if config is None:
        config = {}
-
-   daemon = None
    if isinstance(config, list):
-       assert isinstance(config, list), \
-              "task ceph.restart only supports a list for configuration"
-       config = dict.fromkeys(config)
-       for i in config.keys():
-           type_ = i.split('.', 1)[0]
-           id_ = i.split('.', 1)[1]
-           ctx.daemons.get_daemon(type_, id_).stop()
-           ctx.daemons.get_daemon(type_, id_).restart()
-   else:
+       config = { 'daemons': config }
+   if 'daemons' not in config:
+       config['daemons'] = []
        type_daemon = ['mon', 'osd', 'mds', 'rgw']
        for d in type_daemon:
            type_ = d
            for daemon in ctx.daemons.iter_daemons_of_role(type_):
-               daemon.stop()
-               daemon.restart()
+               config['daemons'].append(type_ + '.' + daemon.id_)
+
+   assert isinstance(config['daemons'], list)
+   daemons = dict.fromkeys(config['daemons'])
+   for i in daemons.keys():
+       type_ = i.split('.', 1)[0]
+       id_ = i.split('.', 1)[1]
+       ctx.daemons.get_daemon(type_, id_).stop()
+       ctx.daemons.get_daemon(type_, id_).restart()
+
    if config.get('wait-for-healthy', True):
        healthy(ctx=ctx, config=None)
+   if config.get('wait-for-osds-up', False):
+       wait_for_osds_up(ctx=ctx, config=None)
    yield
 
 @contextlib.contextmanager

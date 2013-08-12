@@ -1,27 +1,11 @@
 import logging
-import ceph_manager
 import json
-from teuthology import misc as teuthology
 
+import ceph_manager
+from teuthology import misc as teuthology
+from teuthology.task_util.rados import rados
 
 log = logging.getLogger(__name__)
-
-
-def rados(ctx, remote, cmd):
-    testdir = teuthology.get_testdir(ctx)
-    log.info("rados %s" % ' '.join(cmd))
-    pre = [
-        '{tdir}/enable-coredump'.format(tdir=testdir),
-        'ceph-coverage',
-        '{tdir}/archive/coverage'.format(tdir=testdir),
-        'rados',
-        ];
-    pre.extend(cmd)
-    proc = remote.run(
-        args=pre,
-        check_status=False
-        )
-    return proc.exitstatus
 
 def task(ctx, config):
     """
@@ -83,7 +67,7 @@ def task(ctx, config):
     for pg in pgs:
         out = manager.raw_cluster_cmd('pg', pg['pgid'], 'query')
 	log.debug("out string %s",out)
-        j = json.loads('\n'.join(out.split('\n')[1:]))
+        j = json.loads(out)
         log.info("pg is %s, query json is %s", pg, j)
 
         if pg['state'].count('down'):

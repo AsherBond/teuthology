@@ -8,14 +8,17 @@ flavor=$5
 teuthology_branch=$6
 mtype=$7
 template=$8
+distro=$9
 
 if [ -z "$email" ]; then
-    echo "usage: $0 <suite> <ceph branch> <kernel branch> <email> [flavor] [teuthology-branch] [machinetype] [template]"
+    echo "usage: $0 <suite> <ceph branch> <kernel branch> <email> [flavor] [teuthology-branch] [machinetype] [template] [distro]"
     echo "  flavor can be 'basic', 'gcov', 'notcmalloc'."
     exit 1
 fi
 
 [ -z "$flavor" ] && flavor='basic'
+
+[ -z "$distro" ] && distro='ubuntu'
 
 
 ##
@@ -24,7 +27,7 @@ test ! -d ~/src/teuthology/virtualenv/bin && echo "error: expects to find ~/src/
 
 ## get sha1
 KERNEL_SHA1=`wget http://gitbuilder.ceph.com/kernel-deb-precise-x86_64-basic/ref/$kernel/sha1 -O- 2>/dev/null`
-CEPH_SHA1=`wget http://gitbuilder.ceph.com/ceph-tarball-precise-x86_64-$flavor/ref/$ceph/sha1 -O- 2>/dev/null`
+CEPH_SHA1=`wget http://gitbuilder.ceph.com/ceph-deb-precise-x86_64-$flavor/ref/$ceph/sha1 -O- 2>/dev/null`
 
 [ -z "$KERNEL_SHA1" ] && echo "kernel branch $kernel dne" && exit 1
 [ -z "$CEPH_SHA1" ] && echo "ceph branch $ceph dne" && exit 1
@@ -56,11 +59,13 @@ echo "teuthology branch $teuthology_branch"
 fn="/tmp/schedule.suite.$$"
 trap "rm $fn" EXIT
 cat <<EOF > $fn
+teuthology_branch: $teuthology_branch
 kernel:
   kdb: true
   sha1: $KERNEL_SHA1
 nuke-on-error: true
 machine_type: $mtype
+os_type: $distro
 tasks:
 - chef:
 - clock.check:
@@ -76,11 +81,23 @@ overrides:
     sha1: $CEPH_SHA1
     conf:
       mon:
-        debug ms: 20
+        debug ms: 1
         debug mon: 20
         debug paxos: 20
     log-whitelist:
     - slow request
+  ceph-deploy:
+    branch:
+      dev: $ceph
+    conf:
+      mon:
+        debug mon: 1
+        debug paxos: 20
+        debug ms: 20
+      client:
+        log file: /var/log/ceph/ceph-\$name.\$pid.log
+  admin_socket:
+    branch: $ceph
 EOF
 
 if [ "$flavor" = "gcov" ]; then
@@ -96,13 +113,13 @@ fi
 
 ##
 stamp=`date +%Y-%m-%d_%H:%M:%S`
-name=`whoami`"-$stamp-$suite-$ceph-$kernel-$flavor"
+name=`whoami`"-$stamp-$suite-$ceph-$kernel-$flavor-$mtype"
 
 echo "name $name"
 
 ~/src/teuthology/virtualenv/bin/teuthology-suite -v $fn \
     --collections ~/src/ceph-qa-suite/suites/$suite/* \
     --email $email \
-    --timeout 28800 \
+    --timeout 36000 \
     --name $name \
-    --branch $teuthology_branch
+    --worker $mtype
