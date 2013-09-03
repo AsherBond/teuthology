@@ -41,7 +41,7 @@ class Thrasher:
         try:
             manager.raw_cluster_cmd('--', 'tell', 'mon.*', 'injectargs',
                                     '--mon-osd-down-out-interval 0')
-        except:
+        except Exception:
             manager.raw_cluster_cmd('--', 'mon', 'tell', '*', 'injectargs',
                                     '--mon-osd-down-out-interval 0')
         self.thread = gevent.spawn(self.do_thrash)
@@ -516,7 +516,8 @@ class CephManager:
                 ['config', 'set', str(k), str(v)])
 
     def raw_cluster_status(self):
-        return self.raw_cluster_cmd('-s')
+        status = self.raw_cluster_cmd('status', '--format=json-pretty')
+        return json.loads(status)
 
     def raw_osd_status(self):
         return self.raw_cluster_cmd('osd', 'dump')
@@ -548,9 +549,7 @@ class CephManager:
     def get_num_pgs(self):
         status = self.raw_cluster_status()
         self.log(status)
-        return int(re.search(
-                "\d* pgs:",
-                status).group(0).split()[0])
+        return status['pgmap']['num_pgs']
 
     def create_pool(self, pool_name, pg_num=1):
         with self.lock:
@@ -722,13 +721,7 @@ class CephManager:
     def get_num_unfound_objects(self):
         status = self.raw_cluster_status()
         self.log(status)
-        match = re.search(
-            "\d+/\d+ unfound",
-            status)
-        if match == None:
-            return 0
-        else:
-            return int(match.group(0).split('/')[0])
+        return status['pgmap'].get('unfound_objects', 0)
 
     def get_num_creating(self):
         pgs = self.get_pg_stats()
@@ -923,7 +916,13 @@ class CephManager:
             ceph_task.make_admin_daemon_dir(self.ctx, remote)
             self.ctx.daemons.get_daemon('osd', osd).reset()
         self.ctx.daemons.get_daemon('osd', osd).restart()
-        self.wait_run_admin_socket(osd, timeout=timeout)
+        # wait for dump_ops_in_flight; this command doesn't appear
+        # until after the signal handler is installed and it is safe
+        # to stop the osd again without making valgrind leak checks
+        # unhappy.  see #5924.
+        self.wait_run_admin_socket(osd,
+                                   args=['dump_ops_in_flight'],
+                                   timeout=timeout)
 
     def mark_down_osd(self, osd):
         self.raw_cluster_cmd('osd', 'down', str(osd))

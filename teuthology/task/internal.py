@@ -295,7 +295,7 @@ def archive(ctx, config):
 
     try:
         yield
-    except:
+    except Exception:
         # we need to know this below
         ctx.summary['success'] = False
         raise
@@ -453,7 +453,7 @@ kern.* -{adir}/syslog/kern.log;RSYSLOG_FileFormat
                 args=[
                     'egrep',
                     '\\bBUG\\b|\\bINFO\\b|\\bDEADLOCK\\b',
-                    run.Raw('{adir}/archive/syslog/*.log'.format(adir=archive_dir)),
+                    run.Raw('{adir}/syslog/*.log'.format(adir=archive_dir)),
                     run.Raw('|'),
                     'grep', '-v', 'task .* blocked for more than .* seconds',
                     run.Raw('|'),
@@ -465,17 +465,13 @@ kern.* -{adir}/syslog/kern.log;RSYSLOG_FileFormat
                     run.Raw('|'),
                     'grep', '-v', 'CRON',  # ignore cron noise
                     run.Raw('|'),
+                    'grep', '-v', 'BUG: bad unlock balance detected', # #6097
+                    run.Raw('|'),
                     'grep', '-v', 'inconsistent lock state', # FIXME see #2523
                     run.Raw('|'),
                     'grep', '-v', '*** DEADLOCK ***', # part of lockdep output
                     run.Raw('|'),
                     'grep', '-v', 'INFO: possible irq lock inversion dependency detected', # FIXME see #2590 and #147
-                    run.Raw('|'),
-                    'grep', '-v', 'INFO: possible recursive locking detected', # FIXME see #3040
-                    run.Raw('|'),
-                    'grep', '-v', 'BUG: lock held when returning to user space', # REMOVE ME when btrfs sb_internal crap is fixed
-                    run.Raw('|'),
-                    'grep', '-v', 'INFO: possible circular locking dependency detected',  # FIXME remove when xfs stops being noisy and lame.
                     run.Raw('|'),
                     'head', '-n', '1',
                     ],
@@ -494,7 +490,7 @@ kern.* -{adir}/syslog/kern.log;RSYSLOG_FileFormat
             ctx.cluster.run(
                 args=[
                     'find',
-                    '{adir}/archive/syslog'.format(adir=archive_dir),
+                    '{adir}/syslog'.format(adir=archive_dir),
                     '-name',
                     '*.log',
                     '-print0',
@@ -517,7 +513,7 @@ def vm_setup(ctx, config):
     with parallel() as p:
         editinfo = os.path.join(os.path.dirname(__file__),'edit_sudoers.sh')
         for remote in ctx.cluster.remotes.iterkeys():
-            mname = re.match(".*@([^\.]*)\..*", str(remote)).group(1) 
+            mname = re.match(".*@([^\.]*)\.?.*", str(remote)).group(1)
             if teuthology.is_vm(mname):
                 r = remote.run(args=['test', '-e', '/ceph-qa-ready',],
                         stdout=StringIO(),

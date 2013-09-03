@@ -1,9 +1,12 @@
 import argparse
+import fcntl
 import logging
 import os
 import subprocess
+import shutil
 import sys
 import tempfile
+import time
 import yaml
 
 import beanstalkc
@@ -12,10 +15,82 @@ from teuthology import safepath
 
 log = logging.getLogger(__name__)
 
+#teuthology_git_upstream = "https://github.com/ceph/teuthology.git"
+teuthology_git_upstream = "git://ceph.com/teuthology.git"
+
+# simple flock class
+class filelock(object):
+    def __init__(self, fn):
+        self.fn = fn
+        self.fd = None
+
+    def acquire(self):
+        assert not self.fd
+        self.fd = file(self.fn, 'w')
+        fcntl.lockf(self.fd, fcntl.LOCK_EX)
+
+    def release(self):
+        assert self.fd
+        fcntl.lockf(self.fd, fcntl.LOCK_UN)
+        self.fd = None
+
+
 def connect(ctx):
     host = ctx.teuthology_config['queue_host']
     port = ctx.teuthology_config['queue_port']
     return beanstalkc.Connection(host=host, port=port)
+
+
+def fetch_teuthology_branch(path, branch='master'):
+    """
+    Make sure we have the correct teuthology branch checked out and up-to-date
+    """
+    # only let one worker create/update the checkout at a time
+    lock = filelock('%s.lock' % path)
+    lock.acquire()
+    try:
+        if not os.path.isdir(path):
+            log.info("Cloning %s from upstream", branch)
+            log.info(
+                subprocess.check_output(('git', 'clone', '--branch', branch,
+                                         teuthology_git_upstream, path),
+                                        cwd=os.path.dirname(path))
+            )
+        elif time.time() - os.stat('/etc/passwd').st_mtime > 60:
+            # only do this at most once per minute
+            log.info("Fetching %s from upstream", branch)
+            log.info(
+                subprocess.check_output(('git', 'fetch', '-p', 'origin'),
+                                        cwd=path)
+                )
+            log.info(
+                subprocess.check_output(('touch', path))
+                )
+        else:
+            log.info("%s was just updated; assuming it is current", branch)
+
+        # This try/except block will notice if the requested branch doesn't
+        # exist, whether it was cloned or fetched.
+        try:
+            subprocess.check_call(('git', 'reset', '--hard', 'origin/%s' % branch),
+                                  cwd=path)
+        except subprocess.CalledProcessError:
+            log.error("teuthology branch not found: %s", branch)
+            shutil.rmtree(path)
+            raise
+
+        log.info("Bootstrapping %s", path)
+        # This magic makes the bootstrap script not attempt to clobber an
+        # existing virtualenv. But the branch's bootstrap needs to actually
+        # check for the NO_CLOBBER variable.
+        env = os.environ.copy()
+        env['NO_CLOBBER'] = '1'
+        log.info(
+            subprocess.check_output(('./bootstrap'), cwd=path, env=env)
+            )
+
+    finally:
+        lock.release()
 
 def worker():
     parser = argparse.ArgumentParser(description="""
@@ -81,15 +156,23 @@ describe. One job is run at a time.
         log.debug('Config is: %s', job.body)
         job_config = yaml.safe_load(job.body)
         safe_archive = safepath.munge(job_config['name'])
-        teuthology_branch = job_config.get('config', {}).get('teuthology_branch', 'master')
+        teuthology_branch = job_config.get(
+            'config', {}).get('teuthology_branch', 'master')
 
-        teuth_path = os.path.join(os.getenv("HOME"), 'teuthology-' + teuthology_branch, 'virtualenv', 'bin')
-        if not os.path.isdir(teuth_path):
-            raise Exception('Teuthology branch ' + teuthology_branch + ' not found at ' + teuth_path)
+        teuth_path = os.path.join(os.getenv("HOME"),
+                                  'teuthology-' + teuthology_branch)
+
+        fetch_teuthology_branch(path=teuth_path, branch=teuthology_branch)
+
+        teuth_bin_path = os.path.join(teuth_path, 'virtualenv', 'bin')
+        if not os.path.isdir(teuth_bin_path):
+            raise RuntimeError("teuthology branch %s at %s not bootstrapped!" %
+                               (teuthology_branch, teuth_bin_path))
+
         if job_config.get('last_in_suite'):
             log.debug('Generating coverage for %s', job_config['name'])
             args = [
-                os.path.join(teuth_path, 'teuthology-results'),
+                os.path.join(teuth_bin_path, 'teuthology-results'),
                 '--timeout',
                 str(job_config.get('results_timeout', 21600)),
                 '--email',
@@ -98,51 +181,49 @@ describe. One job is run at a time.
                 os.path.join(ctx.archive_dir, safe_archive),
                 '--name',
                 job_config['name'],
-                ]
+            ]
             subprocess.Popen(args=args)
         else:
             log.debug('Creating archive dir...')
             safepath.makedirs(ctx.archive_dir, safe_archive)
             archive_path = os.path.join(ctx.archive_dir, safe_archive, str(job.jid))
             log.info('Running job %d', job.jid)
-            run_job(job_config, archive_path, teuth_path)
+            run_job(job_config, archive_path, teuth_bin_path)
         job.delete()
 
-def run_job(job_config, archive_path, teuth_path):
+
+def run_job(job_config, archive_path, teuth_bin_path):
     arg = [
-        os.path.join(teuth_path, 'teuthology'),
-        ]
+        os.path.join(teuth_bin_path, 'teuthology'),
+    ]
 
     if job_config['verbose']:
         arg.append('-v')
 
     arg.extend([
-            '--lock',
-            '--block',
-            '--owner', job_config['owner'],
-            '--archive', archive_path,
-            '--name', job_config['name'],
-            ])
+        '--lock',
+        '--block',
+        '--owner', job_config['owner'],
+        '--archive', archive_path,
+        '--name', job_config['name'],
+    ])
     if job_config['description'] is not None:
         arg.extend(['--description', job_config['description']])
     arg.append('--')
 
-    with tempfile.NamedTemporaryFile(
-        prefix='teuthology-worker.',
-        suffix='.tmp',
-        ) as tmp:
+    with tempfile.NamedTemporaryFile(prefix='teuthology-worker.',
+                                     suffix='.tmp',) as tmp:
         yaml.safe_dump(data=job_config['config'], stream=tmp)
         tmp.flush()
         arg.append(tmp.name)
         p = subprocess.Popen(
             args=arg,
             close_fds=True,
-            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            )
+        )
         child = logging.getLogger(__name__ + '.child')
-        for line in p.stdout:
-            child.info(': %s', line.rstrip('\n'))
+        for line in p.stderr:
+            child.error(': %s', line.rstrip('\n'))
         p.wait()
         if p.returncode != 0:
             log.error('Child exited with code %d', p.returncode)

@@ -3,6 +3,7 @@ from cStringIO import StringIO
 import json
 import logging
 import os
+import time
 
 from ..orchestra import run
 from teuthology import misc as teuthology
@@ -80,6 +81,7 @@ def _socket_command(ctx, remote, socket_path, command, args):
                 '--admin-daemon', socket_path,
                 ] + command.split(' ') + args,
             stdout=json_fp,
+            check_status=False,
             )
         if proc.exitstatus == 0:
             break

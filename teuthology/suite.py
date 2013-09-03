@@ -1,21 +1,25 @@
+# this file is responsible for submitting tests into the queue
+# by generating combinations of facets found in
+# https://github.com/ceph/ceph-qa-suite.git
+
 import argparse
 import copy
 import errno
 import itertools
 import logging
 import os
-
-# this file is responsible for submitting tests into the queue
-# by generating combinations of facets found in
-# https://github.com/ceph/ceph-qa-suite.git
-
+import re
 import subprocess
 import sys
+import tempfile
+from textwrap import dedent, fill
 import time
 import yaml
 
 from teuthology import misc as teuthology
 from teuthology import safepath
+from teuthology import lock as lock
+from teuthology.config import config
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +45,19 @@ combination, and will override anything in the suite.
         help='be more verbose',
         )
     parser.add_argument(
+        '--dry-run',
+        action='store_true', default=None,
+        help='do a dry run; do not schedule anything',
+        )
+    parser.add_argument(
         '--name',
         help='name for this suite',
         required=True,
+        )
+    parser.add_argument(
+        '--base',
+        default=None,
+        help='base directory for the collection(s)'
         )
     parser.add_argument(
         '--collections',
@@ -104,50 +118,64 @@ combination, and will override anything in the suite.
     if args.owner:
         base_arg.extend(['--owner', args.owner])
 
-    for collection in args.collections:
-        if not os.path.isdir(collection):
-            print >>sys.stderr, 'Collection %s is not a directory' % collection
-            sys.exit(1)
-
     collections = [
-        (collection,
-         os.path.basename(safepath.munge(collection)))
+        (os.path.join(args.base, collection), collection)
         for collection in args.collections
         ]
 
     for collection, collection_name in sorted(collections):
         log.info('Collection %s in %s' % (collection_name, collection))
-        facets = [
-            f for f in sorted(os.listdir(collection))
-            if not f.startswith('.')
-            and os.path.isdir(os.path.join(collection, f))
-            ]
-        facet_configs = (
-            [(f, name, os.path.join(collection, f, name))
-             for name in sorted(os.listdir(os.path.join(collection, f)))
-             if not name.startswith('.')
-             and name.endswith('.yaml')
-             ]
-            for f in facets
-            )
-        for configs in itertools.product(*facet_configs):
-            description = 'collection:%s ' % (collection_name);
-            description += ' '.join('{facet}:{name}'.format(
-                    facet=facet, name=name)
-                                 for facet, name, path in configs)
+        configs = [(combine_path(collection_name, item[0]), item[1]) for item in build_matrix(collection)]
+
+        arch = get_arch(args.config)
+        machine_type = get_machine_type(args.config)
+        for description, config in configs:
+            raw_yaml = '\n'.join([file(a, 'r').read() for a in config])
+
+            parsed_yaml = yaml.load(raw_yaml)
+            os_type = parsed_yaml.get('os_type')
+            exclude_arch = parsed_yaml.get('exclude_arch')
+            exclude_os_type = parsed_yaml.get('exclude_os_type')
+
+            if exclude_arch:
+                if exclude_arch == arch:
+                    log.info(
+                        'Skipping due to excluded_arch: %s facets %s', exclude_arch, description
+                         )
+                    continue
+            if exclude_os_type:
+                if exclude_os_type == os_type:
+                    log.info(
+                        'Skipping due to excluded_os_type: %s facets %s', exclude_os_type, description
+                         )
+                    continue
+            # We should not run multiple tests (changing distros) unless the machine is a VPS
+            # Re-imaging baremetal is not yet supported.
+            if machine_type != 'vps':
+                if os_type and os_type != 'ubuntu':
+                    log.info(
+                        'Skipping due to non-ubuntu on baremetal facets %s', description
+                         )
+                    continue
+
             log.info(
-                'Running teuthology-schedule with facets %s', description
+                'Scheduling %s', description
                 )
+
             arg = copy.deepcopy(base_arg)
             arg.extend([
                     '--description', description,
                     '--',
                     ])
             arg.extend(args.config)
-            arg.extend(path for facet, name, path in configs)
-            subprocess.check_call(
-                args=arg,
-                )
+            arg.extend(config)
+
+            if args.dry_run:
+                log.info('dry-run: %s' % ' '.join(arg))
+            else:
+                subprocess.check_call(
+                    args=arg,
+                    )
 
     arg = copy.deepcopy(base_arg)
     arg.append('--last-in-suite')
@@ -155,9 +183,84 @@ combination, and will override anything in the suite.
         arg.extend(['--email', args.email])
     if args.timeout:
         arg.extend(['--timeout', args.timeout])
-    subprocess.check_call(
-        args=arg,
-        )
+    if args.dry_run:
+        log.info('dry-run: %s' % ' '.join(arg))
+    else:
+        subprocess.check_call(
+            args=arg,
+            )
+
+
+def combine_path(left, right):
+    """
+    os.path.join(a, b) doesn't like it when b is None
+    """
+    if right:
+        return os.path.join(left, right)
+    return left
+
+def build_matrix(path):
+    """
+    Return a list of items describe by path
+
+    The input is just a path.  The output is an array of (description,
+    [file list]) tuples.
+
+    For a normal file we generate a new item for the result list.
+
+    For a directory, we (recursively) generate a new item for each
+    file/dir.
+
+    For a directory with a magic '+' file, we generate a single item
+    that concatenates all files/subdirs.
+
+    For a directory with a magic '%' file, we generate a result set
+    for each tiem in the directory, and then do a product to generate
+    a result list with all combinations.
+
+    The final description (after recursion) for each item will look
+    like a relative path.  If there was a % product, that path
+    component will appear as a file with braces listing the selection
+    of chosen subitems.
+    """
+    if os.path.isfile(path):
+        if path.endswith('.yaml'):
+            return [(None, [path])]
+    if os.path.isdir(path):
+        files = sorted(os.listdir(path))
+        if '+' in files:
+            # concatenate items
+            files.remove('+')
+            out = []
+            for fn in files:
+                out.extend(build_matrix(os.path.join(path, fn)))
+            return [(
+                    '+',
+                    [a[1] for a in out]
+                    )]
+        elif '%' in files:
+            # convolve items
+            files.remove('%')
+            sublists = []
+            for fn in files:
+                raw = build_matrix(os.path.join(path, fn))
+                sublists.append([(combine_path(fn, item[0]), item[1]) for item in raw])
+            out = []
+            for sublist in itertools.product(*sublists):
+                name = '{' + ' '.join([item[0] for item in sublist]) + '}'
+                val = []
+                for item in sublist:
+                    val.extend(item[1])
+                out.append((name, val))
+            return out
+        else:
+            # list items
+            out = []
+            for fn in files:
+                raw = build_matrix(os.path.join(path, fn))
+                out.extend([(combine_path(fn, item[0]), item[1]) for item in raw])
+            return out
+    return []
 
 def ls():
     parser = argparse.ArgumentParser(description='List teuthology job results')
@@ -174,11 +277,8 @@ def ls():
         )
     args = parser.parse_args()
 
-    for j in sorted(os.listdir(args.archive_dir)):
+    for j in get_jobs(args.archive_dir):
         job_dir = os.path.join(args.archive_dir, j)
-        if j.startswith('.') or not os.path.isdir(job_dir):
-            continue
-
         summary = {}
         try:
             with file(os.path.join(job_dir, 'summary.yaml')) as f:
@@ -305,9 +405,10 @@ def results():
 
     try:
         _results(args)
-    except:
+    except Exception:
         log.exception('error generating results')
         raise
+
 
 def _results(args):
     running_tests = [
@@ -315,7 +416,7 @@ def _results(args):
         if not f.startswith('.')
         and os.path.isdir(os.path.join(args.archive_dir, f))
         and not os.path.exists(os.path.join(args.archive_dir, f, 'summary.yaml'))
-        ]
+    ]
     starttime = time.time()
     log.info('Waiting up to %d seconds for tests to finish...', args.timeout)
     while running_tests and args.timeout > 0:
@@ -331,67 +432,8 @@ def _results(args):
             time.sleep(10)
     log.info('Tests finished! gathering results...')
 
-    descriptions = []
-    failures = []
-    num_failures = 0
-    unfinished = []
-    passed = []
-    all_jobs = sorted(os.listdir(args.archive_dir))
-    for j in all_jobs:
-        job_dir = os.path.join(args.archive_dir, j)
-        if j.startswith('.') or not os.path.isdir(job_dir):
-            continue
-        summary_fn = os.path.join(job_dir, 'summary.yaml')
-        if not os.path.exists(summary_fn):
-            unfinished.append(j)
-            continue
-        summary = {}
-        with file(summary_fn) as f:
-            g = yaml.safe_load_all(f)
-            for new in g:
-                summary.update(new)
-        desc = '{test}: ({duration}s) {desc}'.format(
-            duration=int(summary.get('duration', 0)),
-            desc=summary['description'],
-            test=j,
-            )
-        descriptions.append(desc)
-        if summary['success']:
-            passed.append(desc)
-        else:
-            failures.append(desc)
-            num_failures += 1
-            if 'failure_reason' in summary:
-                failures.append('    {reason}'.format(
-                        reason=summary['failure_reason'],
-                        ))
-
-    if failures or unfinished:
-        subject = ('{num_failed} failed, {num_hung} hung, '
-                   '{num_passed} passed in {suite}'.format(
-                num_failed=num_failures,
-                num_hung=len(unfinished),
-                num_passed=len(passed),
-                suite=args.name,
-                ))
-        body = """
-The following tests failed:
-
-{failures}
-
-These tests may be hung (did not finish in {timeout} seconds after the last test in the suite):
-{unfinished}
-
-These tests passed:
-{passed}""".format(
-            failures='\n'.join(failures),
-            unfinished='\n'.join(unfinished),
-            passed='\n'.join(passed),
-            timeout=args.timeout,
-            )
-    else:
-        subject = '{num_passed} passed in {suite}'.format(suite=args.name, num_passed=len(passed))
-        body = '\n'.join(descriptions)
+    (subject, body) = build_email_body(args.name, args.archive_dir,
+                                       args.timeout)
 
     try:
         if args.email:
@@ -400,6 +442,236 @@ These tests passed:
                 from_=args.teuthology_config['results_sending_email'],
                 to=args.email,
                 body=body,
-                )
+            )
     finally:
         generate_coverage(args)
+
+
+def get_http_log_path(archive_dir, job_id):
+    http_base = config.archive_server
+    if not http_base:
+        return None
+    archive_subdir = os.path.split(archive_dir)[-1]
+    return os.path.join(http_base, archive_subdir, str(job_id))
+
+
+def get_jobs(archive_dir):
+    dir_contents = os.listdir(archive_dir)
+
+    def is_job_dir(parent, subdir):
+        if os.path.isdir(os.path.join(parent, subdir)) and re.match('\d+$', subdir):
+            return True
+        return False
+
+    jobs = [job for job in dir_contents if is_job_dir(archive_dir, job)]
+    return sorted(jobs)
+
+
+email_templates = {
+    'body_templ': dedent("""\
+        Test Run: {name}
+        NOTE: Apologies for links inside the Inktank firewall; we are working to make them public.
+        =================================================================
+        logs:   {log_root}
+        failed: {fail_count}
+        hung:   {hung_count}
+        passed: {pass_count}
+
+        {fail_sect}{hung_sect}{pass_sect}
+        """),
+    'sect_templ': dedent("""\
+        {title}
+        =================================================================
+        {jobs}
+        """),
+    'fail_templ': dedent("""\
+        [{job_id}]  {desc}
+        -----------------------------------------------------------------
+        time:   {time}s{log_line}{sentry_line}
+
+        {reason}
+
+        """),
+    'fail_log_templ': "\nlog:    {log}",
+    'fail_sentry_templ': "\nsentry: {sentries}",
+    'hung_templ': dedent("""\
+        [{job_id}] {desc}
+        """),
+    'pass_templ': dedent("""\
+        [{job_id}] {desc}
+        time:    {time}s
+
+        """),
+}
+
+
+
+def build_email_body(name, archive_dir, timeout):
+    failed = {}
+    hung = {}
+    passed = {}
+
+    for job in get_jobs(archive_dir):
+        job_dir = os.path.join(archive_dir, job)
+        summary_file = os.path.join(job_dir, 'summary.yaml')
+
+        # Unfinished jobs will have no summary.yaml
+        if not os.path.exists(summary_file):
+            info_file = os.path.join(job_dir, 'info.yaml')
+
+            desc = ''
+            if os.path.exists(info_file):
+                with file(info_file) as f:
+                    info = yaml.safe_load(f)
+                    desc = info['description']
+
+            hung[job] = email_templates['hung_templ'].format(
+                job_id=job,
+                desc=desc,
+            )
+            continue
+
+        with file(summary_file) as f:
+            summary = yaml.safe_load(f)
+
+        if summary['success']:
+            passed[job] = email_templates['pass_templ'].format(
+                job_id=job,
+                desc=summary.get('description'),
+                time=int(summary.get('duration')),
+            )
+        else:
+            log = get_http_log_path(archive_dir, job)
+            if log:
+                log_line = email_templates['fail_log_templ'].format(log=log)
+            else:
+                log_line = ''
+            sentry_events = summary.get('sentry_events')
+            if sentry_events:
+                sentry_line = email_templates['fail_sentry_templ'].format(
+                    sentries='\n        '.join(sentry_events))
+            else:
+                sentry_line = ''
+
+            # 'fill' is from the textwrap module and it collapses a given
+            # string into multiple lines of a maximum width as specified. We
+            # want 75 characters here so that when we indent by 4 on the next
+            # line, we have 79-character exception paragraphs.
+            reason = fill(summary.get('failure_reason'), 75)
+            reason = '\n'.join(('    ') + line for line in reason.splitlines())
+
+            failed[job] = email_templates['fail_templ'].format(
+                job_id=job,
+                desc=summary.get('description'),
+                time=int(summary.get('duration')),
+                reason=reason,
+                log_line=log_line,
+                sentry_line=sentry_line,
+            )
+
+    maybe_comma = lambda s: ', ' if s else ' '
+
+    subject = ''
+    fail_sect = ''
+    hung_sect = ''
+    pass_sect = ''
+    if failed:
+        subject += '{num_failed} failed{sep}'.format(
+            num_failed=len(failed),
+            sep=maybe_comma(hung or passed)
+        )
+        fail_sect = email_templates['sect_templ'].format(
+            title='Failed',
+            jobs=''.join(failed.values())
+        )
+    if hung:
+        subject += '{num_hung} hung{sep}'.format(
+            num_hung=len(hung),
+            sep=maybe_comma(passed),
+        )
+        hung_sect = email_templates['sect_templ'].format(
+            title='Hung',
+            jobs=''.join(hung.values()),
+        )
+    if passed:
+        subject += '%s passed ' % len(passed)
+        pass_sect = email_templates['sect_templ'].format(
+            title='Passed',
+            jobs=''.join(passed.values()),
+        )
+
+    body = email_templates['body_templ'].format(
+        name=name,
+        log_root=get_http_log_path(archive_dir, ''),
+        fail_count=len(failed),
+        hung_count=len(hung),
+        pass_count=len(passed),
+        fail_sect=fail_sect,
+        hung_sect=hung_sect,
+        pass_sect=pass_sect,
+    )
+
+    subject += 'in {suite}'.format(suite=name)
+    return (subject.strip(), body.strip())
+
+
+def get_arch(config):
+    for yamlfile in config:
+        y = yaml.safe_load(file(yamlfile))
+        machine_type = y.get('machine_type')
+        if machine_type:
+            fakectx = []
+            locks = lock.list_locks(fakectx)
+            for machine in locks:
+                if machine['type'] == machine_type:
+                    arch = machine['arch']
+                    return arch
+    return None
+
+
+def get_os_type(configs):
+    for config in configs:
+        yamlfile = config[2]
+        y = yaml.safe_load(file(yamlfile))
+        if not y:
+            y = {}
+        os_type = y.get('os_type')
+        if os_type:
+            return os_type
+    return None
+
+
+def get_exclude_arch(configs):
+    for config in configs:
+        yamlfile = config[2]
+        y = yaml.safe_load(file(yamlfile))
+        if not y:
+            y = {}
+        exclude_arch = y.get('exclude_arch')
+        if exclude_arch:
+            return exclude_arch
+    return None
+
+
+def get_exclude_os_type(configs):
+    for config in configs:
+        yamlfile = config[2]
+        y = yaml.safe_load(file(yamlfile))
+        if not y:
+            y = {}
+        exclude_os_type = y.get('exclude_os_type')
+        if exclude_os_type:
+            return exclude_os_type
+    return None
+
+
+def get_machine_type(config):
+    for yamlfile in config:
+        y = yaml.safe_load(file(yamlfile))
+        if not y:
+            y = {}
+        machine_type = y.get('machine_type')
+        if machine_type:
+            return machine_type
+    return None
+

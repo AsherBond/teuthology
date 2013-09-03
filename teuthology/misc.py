@@ -25,18 +25,20 @@ global_jobid = None
 checked_jobid = False
 is_vm = lambda x: x.startswith('vpm') or x.startswith('ubuntu@vpm')
 
+is_arm = lambda x: x.startswith('tala') or x.startswith('ubuntu@tala') or x.startswith('saya') or x.startswith('ubuntu@saya')
+
 def get_testdir(ctx):
     if 'test_path' in ctx.teuthology_config:
         return ctx.teuthology_config['test_path']
 
-    basedir = ctx.teuthology_config.get('base_test_dir', '/home/ubuntu/cephtest')
+    basedir = get_testdir_base(ctx)
 
     global global_jobid
     global checked_jobid
 
     # check if a jobid exists in the machine status for all our targets
     # and if its the same jobid, use that as the subdir for the test
-    if not checked_jobid:
+    if not checked_jobid and ctx.config.get('check-locks') != False:
         jobids = {}
         for machine in ctx.config['targets'].iterkeys():
             status = lockstatus.get_status(ctx, machine)
@@ -84,10 +86,23 @@ def get_testdir(ctx):
                     user=get_user()[0:2],
                     stamp=stamp)
 
+
+def get_test_user(ctx):
+    """
+    :returns: str -- the user to run tests as on remote hosts
+    """
+    return ctx.teuthology_config.get('test_user', 'ubuntu')
+
+
 def get_testdir_base(ctx):
     if 'test_path' in ctx.teuthology_config:
         return ctx.teuthology_config['test_path']
-    return ctx.teuthology_config.get('base_test_dir', '/home/ubuntu/cephtest')
+    test_user = get_test_user(ctx)
+    # FIXME this ideally should use os.path.expanduser() in the future, in case
+    # $HOME isn't /home/$USER - e.g. on a Mac. However, since we're executing
+    # this on the server side, it won't work properly.
+    return ctx.teuthology_config.get('base_test_dir', '/home/%s/cephtest' %
+                                     test_user)
 
 def get_ceph_binary_url(package=None,
                         branch=None, tag=None, sha1=None, dist=None,
@@ -317,8 +332,8 @@ def sudo_write_file(remote, path, data, perms=None):
 
 def move_file(remote, from_path, to_path, sudo=False):
 
-    # need to stat the file first, to make sure we 
-    # maintain the same permissions  
+    # need to stat the file first, to make sure we
+    # maintain the same permissions
     args = []
     if sudo:
         args.append('sudo')
@@ -397,8 +412,8 @@ def remove_lines_from_file(remote, path, line_is_valid_test, string_to_test_for)
         else:
             log.info('removing line: {bad_line}'.format(bad_line=line))
 
-    # get a temp file path on the remote host to write to, 
-    # we don't want to blow away the remote file and then have the 
+    # get a temp file path on the remote host to write to,
+    # we don't want to blow away the remote file and then have the
     # network drop out
     temp_file_path = remote_mktemp(remote)
 
@@ -407,14 +422,14 @@ def remove_lines_from_file(remote, path, line_is_valid_test, string_to_test_for)
 
     # then do a 'mv' to the actual file location
     move_file(remote, temp_file_path, path)
-            
+
 def append_lines_to_file(remote, path, lines, sudo=False):
     temp_file_path = remote_mktemp(remote)
- 
+
     data = get_file(remote, path, sudo)
 
     # add the additional data and write it back out, using a temp file
-    # in case of connectivity of loss, and then mv it to the 
+    # in case of connectivity of loss, and then mv it to the
     # actual desired location
     data += lines
     temp_file_path
@@ -565,7 +580,7 @@ def get_wwn_id_map(remote, devs):
             stdout=StringIO(),
             )
         stdout = r.stdout.getvalue()
-    except:
+    except Exception:
         log.error('Failed to get wwn devices! Using /dev/sd* devices...')
         return dict((d,d) for d in devs)
 
@@ -598,7 +613,7 @@ def get_scratch_devices(remote):
     try:
         file_data = get_file(remote, "/scratch_devs")
         devs = file_data.split()
-    except:
+    except Exception:
         r = remote.run(
                 args=['ls', run.Raw('/dev/[sv]d?')],
                 stdout=StringIO()
@@ -633,7 +648,8 @@ def get_scratch_devices(remote):
                     ]
                 )
             retval.append(dev)
-        except:
+        except Exception:
+            log.exception("Saw exception")
             pass
     return retval
 
@@ -778,9 +794,15 @@ def get_clients(ctx, roles):
 def get_user():
     return getpass.getuser() + '@' + socket.gethostname()
 
+
 def read_config(ctx):
-    filename = os.path.join(os.environ['HOME'], '.teuthology.yaml')
     ctx.teuthology_config = {}
+    filename = os.path.join(os.environ['HOME'], '.teuthology.yaml')
+
+    if not os.path.exists(filename):
+        log.debug("%s not found", filename)
+        return
+
     with file(filename) as f:
         g = yaml.safe_load_all(f)
         for new in g:
