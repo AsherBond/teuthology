@@ -82,10 +82,10 @@ def task(ctx, config):
 
         run_cmd=[
             'sudo',
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir),
-            '{tdir}/daemon-helper'.format(tdir=testdir),
+            'daemon-helper',
             daemon_signal,
             ]
         run_cmd_tail=[
@@ -97,12 +97,11 @@ def task(ctx, config):
             ]
 
         if client_config.get('valgrind') is not None:
-            run_cmd.extend(
-                teuthology.get_valgrind_args(
-                    testdir,
-                    'client.{id}'.format(id=id_),
-                    client_config.get('valgrind'),
-                    )
+            run_cmd = teuthology.get_valgrind_args(
+                testdir,
+                'client.{id}'.format(id=id_),
+                run_cmd,
+                client_config.get('valgrind'),
                 )
 
         run_cmd.extend(run_cmd_tail)

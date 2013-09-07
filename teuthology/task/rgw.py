@@ -146,10 +146,10 @@ def start_rgw(ctx, config):
         log.info('client {client} is id {id}'.format(client=client, id=id_))
         run_cmd=[
             'sudo',
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir),
-            '{tdir}/daemon-helper'.format(tdir=testdir),
+            'daemon-helper',
             'term',
             ]
         run_cmd_tail=[
@@ -177,12 +177,11 @@ def start_rgw(ctx, config):
             run.Raw('2>&1'),
             ]
 
-        run_cmd.extend(
-            teuthology.get_valgrind_args(
-                testdir,
-                client,
-                client_config.get('valgrind')
-                )
+        run_cmd = teuthology.get_valgrind_args(
+            testdir,
+            client,
+            run_cmd,
+            client_config.get('valgrind')
             )
 
         run_cmd.extend(run_cmd_tail)
@@ -224,8 +223,8 @@ def start_apache(ctx, config):
             apache_name = '/usr/sbin/httpd'
         proc = remote.run(
             args=[
-                '{tdir}/adjust-ulimits'.format(tdir=testdir),
-                '{tdir}/daemon-helper'.format(tdir=testdir),
+                'adjust-ulimits',
+                'daemon-helper',
                 'kill',
                 apache_name,
                 '-X',

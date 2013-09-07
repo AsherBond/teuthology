@@ -104,6 +104,10 @@ def get_testdir_base(ctx):
     return ctx.teuthology_config.get('base_test_dir', '/home/%s/cephtest' %
                                      test_user)
 
+def get_archive_dir(ctx):
+    test_dir = get_testdir(ctx)
+    return os.path.normpath(os.path.join(test_dir, 'archive'))
+
 def get_ceph_binary_url(package=None,
                         branch=None, tag=None, sha1=None, dist=None,
                         flavor=None, format=None, arch=None):
@@ -287,7 +291,7 @@ def create_simple_monmap(ctx, remote, conf):
 
     testdir = get_testdir(ctx)
     args = [
-        '{tdir}/adjust-ulimits'.format(tdir=testdir),
+        'adjust-ulimits',
         'ceph-coverage',
         '{tdir}/archive/coverage'.format(tdir=testdir),
         'monmaptool',
@@ -660,7 +664,7 @@ def wait_until_healthy(ctx, remote):
     while True:
         r = remote.run(
             args=[
-                '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                'adjust-ulimits',
                 'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'ceph',
@@ -682,7 +686,7 @@ def wait_until_osds_up(ctx, cluster, remote):
     while True:
         r = remote.run(
             args=[
-                '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                'adjust-ulimits',
                 'ceph-coverage',
                 '{tdir}/archive/coverage'.format(tdir=testdir),
                 'ceph',
@@ -771,7 +775,7 @@ def write_secret_file(ctx, remote, role, keyring, filename):
     testdir = get_testdir(ctx)
     remote.run(
         args=[
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir),
             'ceph-authtool',
@@ -858,7 +862,15 @@ def deep_merge(a, b):
         return a
     return b
 
-def get_valgrind_args(testdir, name, v):
+def get_valgrind_args(testdir, name, preamble, v):
+    """
+    Build a command line for running valgrind.
+
+    testdir - test results directory
+    name - name of daemon (for naming hte log file)
+    preamble - stuff we should run before valgrind
+    v - valgrind arguments
+    """
     if v is None:
         return []
     if not isinstance(v, list):
@@ -866,22 +878,25 @@ def get_valgrind_args(testdir, name, v):
     val_path = '/var/log/ceph/valgrind'.format(tdir=testdir)
     if '--tool=memcheck' in v or '--tool=helgrind' in v:
         extra_args = [
-            '{tdir}/chdir-coredump'.format(tdir=testdir),
+
             'valgrind',
+            '--num-callers=50',
             '--suppressions={tdir}/valgrind.supp'.format(tdir=testdir),
             '--xml=yes',
             '--xml-file={vdir}/{n}.log'.format(vdir=val_path, n=name)
             ]
     else:
         extra_args = [
-            '{tdir}/chdir-coredump'.format(tdir=testdir),
             'valgrind',
             '--suppressions={tdir}/valgrind.supp'.format(tdir=testdir),
             '--log-file={vdir}/{n}.log'.format(vdir=val_path, n=name)
             ]
-    extra_args.extend(v)
-    log.debug('running %s under valgrind with args %s', name, extra_args)
-    return extra_args
+    args = [
+        'cd', testdir,
+        run.Raw('&&'),
+        ] + preamble + extra_args + v
+    log.debug('running %s under valgrind with args %s', name, args)
+    return args
 
 def stop_daemons_of_type(ctx, type_):
     log.info('Shutting down %s daemons...' % type_)

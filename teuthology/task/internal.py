@@ -282,8 +282,7 @@ def check_conflict(ctx, config):
 @contextlib.contextmanager
 def archive(ctx, config):
     log.info('Creating archive directory...')
-    testdir = teuthology.get_testdir(ctx)
-    archive_dir = '{tdir}/archive'.format(tdir=testdir)
+    archive_dir = teuthology.get_archive_dir(ctx)
     run.wait(
         ctx.cluster.run(
             args=[
@@ -323,10 +322,39 @@ def archive(ctx, config):
                 ),
             )
 
+
+@contextlib.contextmanager
+def sudo(ctx, config):
+    log.info('Configuring sudo...')
+    sudoers_file = '/etc/sudoers'
+    backup_ext = '.orig'
+    tty_expr = 's/requiretty/!requiretty/'
+    pw_expr = 's/!visiblepw/visiblepw/'
+
+    run.wait(
+        ctx.cluster.run(
+            args="sudo sed -i{ext} -e '{tty}' -e '{pw}' {path}".format(
+                ext=backup_ext, tty=tty_expr, pw=pw_expr,
+                path=sudoers_file
+            ),
+            wait=False,
+        )
+    )
+    try:
+        yield
+    finally:
+        log.info('Restoring {}...'.format(sudoers_file))
+        ctx.cluster.run(
+            args="sudo mv -f {path}{ext} {path}".format(
+                path=sudoers_file, ext=backup_ext
+            )
+        )
+
+
 @contextlib.contextmanager
 def coredump(ctx, config):
     log.info('Enabling coredump saving...')
-    archive_dir = '{tdir}/archive'.format(tdir=teuthology.get_testdir(ctx))
+    archive_dir = teuthology.get_archive_dir(ctx)
     run.wait(
         ctx.cluster.run(
             args=[
@@ -384,7 +412,7 @@ def syslog(ctx, config):
 
     log.info('Starting syslog monitoring...')
 
-    archive_dir = '{tdir}/archive'.format(tdir=teuthology.get_testdir(ctx))
+    archive_dir = teuthology.get_archive_dir(ctx)
     run.wait(
         ctx.cluster.run(
             args=[

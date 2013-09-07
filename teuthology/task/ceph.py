@@ -145,51 +145,66 @@ def ceph_log(ctx, config):
     finally:
         pass
 
+
 @contextlib.contextmanager
 def ship_utilities(ctx, config):
     assert config is None
-    FILES = ['daemon-helper', 'adjust-ulimits', 'chdir-coredump',
-             'valgrind.supp', 'kcon_most']
     testdir = teuthology.get_testdir(ctx)
+    filenames = []
+
+    log.info('Shipping valgrind.supp...')
+    with file(os.path.join(os.path.dirname(__file__), 'valgrind.supp'), 'rb') as f:
+        fn = os.path.join(testdir, 'valgrind.supp')
+        filenames.append(fn)
+        for rem in ctx.cluster.remotes.iterkeys():
+            teuthology.sudo_write_file(
+                remote=rem,
+                path=fn,
+                data=f,
+                )
+            f.seek(0)
+
+    FILES = ['daemon-helper', 'adjust-ulimits', 'kcon_most']
+    destdir = '/usr/local/bin'
     for filename in FILES:
         log.info('Shipping %r...', filename)
         src = os.path.join(os.path.dirname(__file__), filename)
-        dst = os.path.join(testdir, filename)
+        dst = os.path.join(destdir, filename)
+        filenames.append(dst)
         with file(src, 'rb') as f:
             for rem in ctx.cluster.remotes.iterkeys():
-                teuthology.write_file(
+                teuthology.sudo_write_file(
                     remote=rem,
                     path=dst,
                     data=f,
-                    )
+                )
                 f.seek(0)
                 rem.run(
                     args=[
+                        'sudo',
                         'chmod',
                         'a=rx',
                         '--',
                         dst,
-                        ],
-                    )
+                    ],
+                )
 
     try:
         yield
     finally:
-        log.info('Removing shipped files: %s...', ' '.join(FILES))
-        filenames = (
-            os.path.join(testdir, filename)
-            for filename in FILES
-            )
+        log.info('Removing shipped files: %s...', ' '.join(filenames))
         run.wait(
             ctx.cluster.run(
                 args=[
+                    'sudo',
                     'rm',
-                    '-rf',
+                    '-f',
                     '--',
-                    ] + list(filenames),
+                ] + list(filenames),
                 wait=False,
-                ),
-            )
+            ),
+        )
+
 
 def assign_devs(roles, devs):
     return dict(zip(roles, devs))
@@ -396,7 +411,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -407,7 +422,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -435,7 +450,7 @@ def cluster(ctx, config):
     ctx.cluster.only(firstmon).run(
         args=[
             'sudo',
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             coverage_dir,
             'ceph-authtool',
@@ -479,7 +494,7 @@ def cluster(ctx, config):
     run.wait(
         mons.run(
             args=[
-                '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                'adjust-ulimits',
                 'ceph-coverage',
                 coverage_dir,
                 'osdmaptool',
@@ -507,10 +522,10 @@ def cluster(ctx, config):
                     '-p',
                     '/var/lib/ceph/mds/ceph-{id}'.format(id=id_),
                     run.Raw('&&'),
-                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                    'sudo',
+                    'adjust-ulimits',
                     'ceph-coverage',
                     coverage_dir,
-                    'sudo',
                     'ceph-authtool',
                     '--create-keyring',
                     '--gen-key',
@@ -610,11 +625,11 @@ def cluster(ctx, config):
         for id_ in teuthology.roles_of_type(roles_for_host, 'osd'):
             remote.run(
                 args=[
+                    'sudo',
                     'MALLOC_CHECK_=3',
-                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                    'adjust-ulimits',
                     'ceph-coverage',
                     coverage_dir,
-                    'sudo',
                     'ceph-osd',
                     '--mkfs',
                     '--mkkey',
@@ -668,7 +683,7 @@ def cluster(ctx, config):
             mons.run(
                 args=[
                     'sudo',
-                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                    'adjust-ulimits',
                     'ceph-coverage',
                     coverage_dir,
                     'ceph-authtool',
@@ -695,10 +710,10 @@ def cluster(ctx, config):
                 )
             remote.run(
                 args=[
-                    '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                    'sudo',
+                    'adjust-ulimits',
                     'ceph-coverage',
                     coverage_dir,
-                    'sudo',
                     'ceph-mon',
                     '--mkfs',
                     '-i', id_,
@@ -874,11 +889,11 @@ def run_daemon(ctx, config, type_):
                 num_active += 1
 
             run_cmd = [
-                '{tdir}/adjust-ulimits'.format(tdir=testdir),
+                'sudo',
+                'adjust-ulimits',
                 'ceph-coverage',
                 coverage_dir,
-                'sudo',
-                '{tdir}/daemon-helper'.format(tdir=testdir),
+                'daemon-helper',
                 daemon_signal,
                 ]
             run_cmd_tail = [
@@ -886,17 +901,19 @@ def run_daemon(ctx, config, type_):
                 '-f',
                 '-i', id_]
 
+            if type_ in config.get('cpu_profile', []):
+                profile_path = '/var/log/ceph/profiling-logger/%s.%s.prof' % (type_, id_)
+                run_cmd.extend([ 'env', 'CPUPROFILE=%s' % profile_path ])
+
             if config.get('valgrind') is not None:
                 valgrind_args = None
                 if type_ in config['valgrind']:
                     valgrind_args = config['valgrind'][type_]
                 if name in config['valgrind']:
                     valgrind_args = config['valgrind'][name]
-                run_cmd.extend(teuthology.get_valgrind_args(testdir, name, valgrind_args))
-
-            if type_ in config.get('cpu_profile', []):
-                profile_path = '/var/log/ceph/profiling-logger/%s.%s.prof' % (type_, id_)
-                run_cmd.extend([ 'env', 'CPUPROFILE=%s' % profile_path ])
+                run_cmd = teuthology.get_valgrind_args(testdir, name,
+                                                       run_cmd,
+                                                       valgrind_args)
 
             run_cmd.extend(run_cmd_tail)
 
@@ -912,7 +929,7 @@ def run_daemon(ctx, config, type_):
         (mon0_remote,) = ctx.cluster.only(firstmon).remotes.keys()
 
         mon0_remote.run(args=[
-            '{tdir}/adjust-ulimits'.format(tdir=testdir),
+            'adjust-ulimits',
             'ceph-coverage',
             coverage_dir,
             'ceph',
