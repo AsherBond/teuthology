@@ -197,12 +197,17 @@ def remove_osd_tmpfs(ctx, log):
         )
 
 def reboot(ctx, remotes, log):
+    from .orchestra import run
     import time
     nodes = {}
     for remote in remotes:
         log.info('rebooting %s', remote.name)
         proc = remote.run( # note use of -n to force a no-sync reboot
-            args=['sudo', 'reboot', '-f', '-n'],
+            args=[
+                'timeout', '5', 'sync',
+                run.Raw(';'),
+                'sudo', 'reboot', '-f', '-n'
+                ],
             wait=False
             )
         nodes[remote] = proc
@@ -353,6 +358,7 @@ def main():
             ctx.owner = info.get('owner')
             if not ctx.owner:
                 ctx.owner = open(ctx.archive + '/owner').read().rstrip('\n')
+        ctx.run_name = info.get('name')
 
     from teuthology.misc import read_config
     read_config(ctx)
@@ -379,7 +385,19 @@ def main():
 def nuke(ctx, log, should_unlock, sync_clocks=True, reboot_all=True,
          noipmi=False):
     from teuthology.parallel import parallel
+    from teuthology.lock import list_locks
     total_unnuked = {}
+    targets = dict(ctx.config['targets'])
+    if ctx.run_name:
+        log.info('Checking targets against current locks')
+        locks = list_locks(ctx)
+        #Remove targets who's description doesn't match archive name.
+        for lock in locks:
+            for target in targets:
+                 if target == lock['name']:
+                     if ctx.run_name not in lock['description']:
+                         del ctx.config['targets'][lock['name']]
+                         log.info('Not nuking %s because description doesn\'t match', lock['name'])
     with parallel() as p:
         for target, hostkey in ctx.config['targets'].iteritems():
             p.spawn(
